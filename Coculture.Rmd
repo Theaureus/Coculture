@@ -1,0 +1,3000 @@
+---
+title: "Coculture analysis"
+author: "Theo Trabac"
+date: "3 novembre 2017"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE,  message = FALSE, error = FALSE, warning=TRUE)
+```
+
+#Coculture
+
+		The maize-bean polyculture method is traditionally used (among others) in the Hautes-Pyrenées department (Southern France) and basically consist of growing bean close to maize so the latest can be used as stakes. Besides this aspect, this method is used for yield benefits that have been observed by local farmers. Contrarily to monoculture, polyculture and intercropping permit interspecific root interactions. Scientific studies reported that those two plants have complementary root architecture, resulting in a reduced intraspecific nutrient competition in the root-surrounding soil (Postma and Lynch, 2012). Moreover, nutrient uptake (N and P) have been observed to be significantly higher for both maize and bean when roots can intermingle than when they can't (Li et al. 2003). Although it should be acknowledged that contradictory results have also been reported, highlighting the importance of numerous factors such as soil type, plant development stage and species-specific interactions, contact duration between the two species and at last fertilizer inputs.
+		  Underground plant interactions seem to not only impact plant health and growth, but also soil proprieties and rhizosphere microbial community (Li et al. 2010). For instance, N transfers from N2 symbiotic fixer bean to maize via mycorrhizal hyphae have been related (Bethlenfalvay et al, 1991). This LabEx BASC project called CoCulture focuses on highlighting the determining factors of maize-bean polyculture benefits via rhizosphere physicochemical soil and 16S RNA gene sequencing analysis. 
+      In the following, we will use the "Coculture" term to refer to the maize-bean polyculture. For the microbiome analysis (16S RNA gene Illumina Miseq 300x2 sequencing) 39 samples were taken. Among them, five were taken in different fields from monoculture maize rhizosphere. Four were taken in different fields from monoculture bean rhizosphere. Seven were taken from coculture maize rhizosphere and seven from corresponding bean rhizosphere. Each time, a control sample of bulk soil was taken. DNA extraction, sequencing and trimming and quality control were performed by M.DNA. A phylogenetic tree (Newick format) was elaborated using the NJ (default parameters) method from the MAFFT software (see description in my MS rapport). The tree, the OTUs accounting matrix and the metadata were used to perform analysis with mainly the phyloseq and DESeq2 packages from the Rstudio software. It should be acknowledged that the analysis showed below are not sorted following the logical reasoning path but have been compacted in order to reduce the size and the complexity of the script.
+
+##Packages
+```{r}
+library(tidyverse)
+library(phyloseq)
+library(devtools)
+library(FactoMineR)
+library(factoextra)
+library(scales)
+library(viridis)
+library(vegan)
+library(ade4)
+library(ape)
+library(cowplot)
+library(png)
+library(RColorBrewer)
+library(grid)
+library(gridExtra)
+library(ggplot2)
+library(ape)
+library(gplots)
+library(limma)
+library(pheatmap)
+library(agricolae)
+library(genefilter)
+library(DESeq2)
+```
+
+##Datas
+###Phyloseq object 
+```{r}
+##otumat is the OTU matrix 
+otumat <- read.csv(file = "../data-raw/otumat.csv")
+otumat <- otumat[,-1]
+colnames(otumat) <- paste0("Sample", 1:ncol(otumat))
+rownames(otumat) <- paste0("OTU", 1:nrow(otumat))
+otumat <- as.matrix(otumat)
+
+##taxmat is a matrix containing taxonomic ranks for each OTU
+taxmat <- read.csv(file = "../data-raw/taxmat1.csv")
+taxmat <- taxmat[,-1]
+rownames(taxmat) <- rownames(otumat)
+colnames(taxmat) <- c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+taxmat <- as.matrix(taxmat)
+
+#Distance method based (NJ) dendrogram (Newick format) with all the OTUs detected in all the samples
+tree <- read.tree("../data-raw/tree")
+
+#OTU label assignation to the OTU matrix
+OTU = otu_table(otumat, taxa_are_rows = TRUE)
+
+#TAX label assignation to the taxonomy matrix 
+TAX = tax_table(taxmat)
+
+#TREE label assignation to the dendrogram 
+TREE = phy_tree(tree)
+
+#merging the three labelled objects into one phyloseq object 
+physeq = phyloseq(OTU, TAX, TREE)
+physeq
+
+#Since the "Casagrande" value for the "farmer" factor refers to two geographically distant fields, we distinguished those two conditions by the values "Ca1" and "Ca2" in an extra factor labelled "farmer2"
+meta_df1 <- read.csv("../data-raw/metadata1.csv")
+meta_df1 <- meta_df1[,-1]
+rownames(meta_df1) <- colnames(OTU)
+sampledata = sample_data(meta_df1)
+
+#Adding an extra factor ("concom") by merging "condition" and "compartment" factors
+sampledata$concom <- as.factor(paste(sampledata$condition, "_", sampledata$compartment))
+
+#Creating a string factor with the column labelled "concom"
+concom <- as.factor(sampledata$concom)
+
+#Creating a string factor with the column labelled "farmer2"
+farmer2 <- as.character(sampledata$farmer2)
+
+#Creating a factor added as a column in the sampledata data frame by replacing the "Ca1" and "Ca2" values by "Ca". This can be useful for statistic tests or plots for which the full farmer name should not appear
+sampledata$farmer3 <- as.factor(replace(farmer2, farmer2 %in% c("Ca1", "Ca2"), "Ca"))
+
+#Adding metadata to the phyloseq object, filtering the non-bacteria domain and the Rhizobium genus. The latest was removed because of its well-known colonisation of the bean roots. Sampling rhizospheric soil can be tricky and some samples showed tremendous amounts (>80% of total sequences) of Rhizobium, suggesting that those samples contained bean root symbiotic nodules. 
+physeq = merge_phyloseq(physeq, sampledata)
+physeq <- subset_taxa(physeq, Domain =="bacteria")
+physeq = subset_taxa(physeq, Genus != "rhizobium")
+```
+
+###Noramalized OTU counts per sample
+```{r}
+physeq_pct <- transform_sample_counts(physeq, function(OTU) OTU/sum(OTU)*100 )
+```
+
+
+###Matrix for multivariate analysis
+```{r}
+#OTU matrix transposition (OTUs are columns and samples are rows), for PCA-like analysis.
+otusmat <- as.matrix(physeq@otu_table)
+otusmatt <- t(otusmat)
+
+```
+
+##Barplot
+We used the barplot function from the phyloseq package, which is a handy way for data visualization. Since we don't know how strong is the effect of polyculture on the rhizo-microbiome, we can look for the taxonomic scale that seems to be the most impacted.
+###Extracting 10 most abundant taxa
+Barplot charts are good for representing up to 10 or 15 taxa, above that, visualisation is not easy to read. Here we selected the 10 most abundant taxa (based on percentage normalization) in the whole dataset for each taxonomic level and we calculated those OTU sequences proportion for each condition.
+####Phylum
+```{r}
+#OTUs agglomerated at the phylum level. 
+physeq_plm <-
+  physeq %>% 
+  tax_glom(taxrank = "Phylum")
+
+#Samples merged according to the "concom" factor (i.e. pooling OTUs from samples sharing the condition and compartment).
+physeq_plm_concom <-
+  physeq_plm %>% 
+  merge_samples("concom")
+
+#merging the samples resulted in losing the information about the "concom" factor in the data frame, factor-level labels have been replaced by numeric values, here we put back labels for each level of the "concom" factor.
+physeq_plm_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bean-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+#Counts normalized by percentage.
+physeq_plm_concom_pct <-
+  physeq_plm_concom %>%
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Selecting the top10 OTUs based on percentage normalization.
+physeq_plm_concom_pct_top10 <-
+  prune_taxa(names(sort(taxa_sums(physeq_plm_concom_pct),
+                        TRUE))[1:10], physeq_plm_concom_pct)
+
+#Calculating the top10 OTU representation among conditions. 
+summary(rowSums(physeq_plm_concom_pct_top10@otu_table))
+
+#Normalizing again for easier visualization.
+physeq_plm_concom_pct_top10_pct <-
+  physeq_plm_concom_pct_top10 %>%
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Barplot showing the 10 most abundant OTU percentage according to conditions.
+physeq_plm_concom_pct_top10_pct %>% 
+  plot_bar(fill = "Phylum", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#aaa4a2",
+"#a0654f",
+"#cf6631",
+"#aad240",
+"#8dae5a",
+"#6bb99d",
+"#828dc3",
+"#854ec7",
+"#4d394e",
+"#c44f90"))
+
+```
+
+No tremendous differences at first sight for the phylum level. Although we can observe an increase and a decrease respectively for the Actinobacteria and the Proteobacteria phyla, for maize and bean rhizospheres in polyculture condition against the bulk soil. 
+
+####Classes
+The same process applied to the class phylogenetic rank.
+```{r}
+#OTUs agglomerated at the Class level. 
+physeq_cls <-
+  physeq %>% 
+  tax_glom(taxrank = "Class")
+
+#Samples merged according to the "concom" factor (i.e. pooling OTUs from samples sharing the condition and compartment).
+physeq_cls_concom <-
+  physeq_cls %>% 
+  merge_samples("concom")
+
+#merging the samples resulted in losing the information about the "concom" factor in the data frame, factor-level labels have been replaced by numeric values, here we put back labels for each level of the "concom" factor.
+physeq_cls_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bean-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+#Counts normalized by percentage.
+physeq_cls_concom_pct <-
+  physeq_cls_concom %>%
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Selecting the top10 OTUs based on percentage normalization.
+physeq_cls_concom_pct_top10 <-
+  prune_taxa(names(sort(taxa_sums(physeq_cls_concom_pct),
+                        TRUE))[1:10], physeq_cls_concom_pct)
+
+#Calculating the top10 OTU representation among conditions. 
+summary(rowSums(physeq_cls_concom_pct_top10@otu_table))
+
+#Normalizing again for easier visualization.
+physeq_cls_concom_pct_top10_pct <-
+  physeq_cls_concom_pct_top10 %>%
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Barplot showing the 10 most abundant OTU percentage according to conditions.
+physeq_cls_concom_pct_top10_pct %>% 
+  plot_bar(fill = "Class", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#aaa4a2",
+"#a0654f",
+"#cf6631",
+"#aad240",
+"#8dae5a",
+"#6bb99d",
+"#828dc3",
+"#854ec7",
+"#4d394e",
+"#c44f90"))
+
+```
+Still no tremendous differences. Especially for the monoculture versus polyculture rhizosphere.
+
+####Orders
+```{r}
+#OTUs agglomerated at the Order level. 
+physeq_odr <-
+  physeq %>% 
+  tax_glom(taxrank = "Order")
+
+#Samples merged according to the "concom" factor (i.e. pooling OTUs from samples sharing the condition and compartment).
+physeq_odr_concom <-
+  physeq_odr %>% 
+  merge_samples("concom")
+
+#merging the samples resulted in losing the information about the "concom" factor in the data frame, factor-level labels have been replaced by numeric values, here we put back labels for each level of the "concom" factor.
+physeq_odr_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bean-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+#Counts normalized by percentage.
+physeq_odr_concom_pct <-
+  physeq_odr_concom %>%
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Selecting the top10 OTUs based on percentage normalization.
+physeq_odr_concom_pct_top10 <-
+  prune_taxa(names(sort(taxa_sums(physeq_odr_concom_pct),
+                        TRUE))[1:10], physeq_odr_concom_pct)
+
+#Calculating the top10 OTU representation among conditions. 
+summary(rowSums(physeq_odr_concom_pct_top10@otu_table))
+
+#Normalizing again for easier visualization.
+physeq_odr_concom_pct_top10_pct <-
+  physeq_odr_concom_pct_top10 %>%
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Barplot showing the 10 most abundant OTU percentage according to conditions.
+physeq_odr_concom_pct_top10_pct %>% 
+  plot_bar(fill = "Order", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#aaa4a2",
+"#a0654f",
+"#cf6631",
+"#aad240",
+"#8dae5a",
+"#6bb99d",
+"#828dc3",
+"#854ec7",
+"#4d394e",
+"#c44f90"))
+```
+Still no tremendous differences at this taxonomic level. Not surprisingly, Pseudomonadales order proportion looks to be higher in the rhizosphere compartment than in the bulk soil, no matter the culture type.  
+
+####Families
+```{r}
+#OTUs agglomerated at the Family level. 
+physeq_fmy <-
+  physeq %>% 
+  tax_glom(taxrank = "Family")
+
+#Samples merged according to the "concom" factor (i.e. pooling OTUs from samples sharing the condition and compartment).
+physeq_fmy_concom <-
+  physeq_fmy %>% 
+  merge_samples("concom")
+
+#merging the samples resulted in losing the information about the "concom" factor in the data frame, factor-level labels have been replaced by numeric values, here we put back labels for each level of the "concom" factor.
+physeq_fmy_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bean-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+#Counts normalized by percentage.
+physeq_fmy_concom_pct <-
+  physeq_fmy_concom %>%
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Selecting the top10 OTUs based on percentage normalization.
+physeq_fmy_concom_pct_top10 <-
+  prune_taxa(names(sort(taxa_sums(physeq_fmy_concom_pct),
+                        TRUE))[1:10], physeq_fmy_concom_pct)
+
+#Calculating the top10 OTU representation among conditions. 
+summary(rowSums(physeq_fmy_concom_pct_top10@otu_table))
+
+#Normalizing again for easier visualization.
+physeq_fmy_concom_pct_top10_pct <-
+  physeq_fmy_concom_pct_top10 %>%
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Barplot showing the 10 most abundant OTU percentage according to conditions.
+physeq_fmy_concom_pct_top10_pct %>% 
+  plot_bar(fill = "Family", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#aaa4a2",
+"#a0654f",
+"#cf6631",
+"#aad240",
+"#8dae5a",
+"#6bb99d",
+"#828dc3",
+"#854ec7",
+"#4d394e",
+"#c44f90"))
+
+```
+Still no tremendous differences. Besides for the Pseudomonadaceae family between bean rhizosphere and bulk soil.
+
+####Genus
+```{r}
+#OTUs agglomerated at the Genus level. 
+physeq_gns <-
+  physeq %>% 
+  tax_glom(taxrank = "Genus")
+
+#Samples merged according to the "concom" factor (i.e. pooling OTUs from samples sharing the condition and compartment).
+physeq_gns_concom <-
+  physeq_gns %>% 
+  merge_samples("concom")
+
+#merging the samples resulted in losing the information about the "concom" factor in the data frame, factor-level labels have been replaced by numeric values, here we put back labels for each level of the "concom" factor.
+physeq_gns_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bean-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+#Counts normalized by percentage.
+physeq_gns_concom_pct <-
+  physeq_gns_concom %>%
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Selecting the top10 OTUs based on percentage normalization.
+physeq_gns_concom_pct_top10 <-
+  prune_taxa(names(sort(taxa_sums(physeq_gns_concom_pct),
+                        TRUE))[1:10], physeq_gns_concom_pct)
+
+#Calculating the top10 OTU representation among conditions. 
+summary(rowSums(physeq_gns_concom_pct_top10@otu_table))
+
+#Normalizing again for easier visualization.
+physeq_gns_concom_pct_top10_pct <-
+  physeq_gns_concom_pct_top10 %>%
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Barplot showing the 10 most abundant OTU percentage according to conditions.
+physeq_gns_concom_pct_top10_pct %>% 
+  plot_bar(fill = "Genus", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#aaa4a2",
+"#a0654f",
+"#cf6631",
+"#aad240",
+"#8dae5a",
+"#6bb99d",
+"#828dc3",
+"#854ec7",
+"#4d394e",
+"#c44f90"))
+```
+The Pseudomonas genus proportion is higher within the bean rhizosphere condition than in any other condition. But still no pattern seems to differenciate polyculture from monoculture rhizo-microbiome.
+
+####Species
+```{r}
+#OTUs agglomerated at the Species level. 
+physeq_sps <-
+  physeq %>% 
+  tax_glom(taxrank = "Species")
+
+#Samples merged according to the "concom" factor (i.e. pooling OTUs from samples sharing the condition and compartment).
+physeq_sps_concom <-
+  physeq_sps %>% 
+  merge_samples("concom")
+
+#merging the samples resulted in losing the information about the "concom" factor in the data frame, factor-level labels have been replaced by numeric values, here we put back labels for each level of the "concom" factor.
+physeq_sps_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bean-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+#Counts normalized by percentage.
+physeq_sps_concom_pct <-
+  physeq_sps_concom %>%
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Selecting the top10 OTUs based on percentage normalization.
+physeq_sps_concom_pct_top10 <-
+  prune_taxa(names(sort(taxa_sums(physeq_sps_concom_pct),
+                        TRUE))[1:10], physeq_sps_concom_pct)
+
+#Calculating the top10 OTU representation among conditions. 
+summary(rowSums(physeq_sps_concom_pct_top10@otu_table))
+
+#Normalizing again for easier visualization.
+physeq_sps_concom_pct_top10_pct <-
+  physeq_sps_concom_pct_top10 %>%
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Barplot showing the 10 most abundant OTU percentage according to conditions.
+physeq_sps_concom_pct_top10_pct %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#aaa4a2",
+"#a0654f",
+"#cf6631",
+"#aad240",
+"#8dae5a",
+"#6bb99d",
+"#828dc3",
+"#854ec7",
+"#4d394e",
+"#c44f90"))
+```
+Still no clear patern. Although we can observe more differences for low taxonomical rank. Meaning that the effect of polyculture could be specie or even strain specific. 
+
+###Filtering low variance
+Another way to visualize a potential effect of polyculture on the rhizo-microbiome is to filter the low variance OTUs. So only the highly variant OTUs between conditions will be displayed.
+
+####Phylum
+#####Var > 0.1
+```{r}
+#var > 0.1 : Selecting OTUs which show a variance value superior to 0.1.
+physeq_plm_concom_pct_highVar0.1 = 
+  filter_taxa(physeq_plm_concom_pct, 
+              function(x) var(x) > 0.1, TRUE)
+
+#So We can take a look at the species names
+physeq_plm_concom_pct_highVar0.1@tax_table
+
+#Creating an atomic vector containing the names of those OTUs 
+physeq_plm_concom_names_highVar0.1 <-
+  as.data.frame(physeq_plm_concom_pct_highVar0.1@tax_table)
+
+#We can now exctract those OTus from the unormalized sequences-data set (still regrouped by Phylum and conditions)
+physeq_plm_concom_highVar0.1 <- subset_taxa(physeq_plm_concom, Phylum %in% physeq_plm_concom_names_highVar0.1$Phylum)
+
+#Take a look at the names (those we wanted, we made it !)
+physeq_plm_concom_highVar0.1@tax_table
+
+#Check the number of sequences (huge variance can results by presence of 0, which is something we don't want), but here there is no zero sequence OTU, grand !
+physeq_plm_concom_highVar0.1@otu_table
+
+#Normalizing the sequences per percentages for visual comparison.
+physeq_plm_concom_highVar0.1_pct <-
+  physeq_plm_concom_highVar0.1 %>% 
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Bar_plot the datas (relative abundance of the 6 most variating species within 7 conditions)
+physeq_plm_concom_highVar0.1_pct %>% 
+  plot_bar(fill = "Phylum", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#4aac8d",
+"#c85a83",
+"#7bac43",
+"#8d72c9",
+"#cf7233",
+"#a3814e"))
+
+```
+At this level, even the most variating OTUs do not display marked differences.
+
+####Classes
+#####Var > 0.1
+```{r}
+
+physeq_cls_concom_pct_highVar0.1 = 
+  filter_taxa(physeq_cls_concom_pct, 
+              function(x) var(x) > 0.1, TRUE)
+
+physeq_cls_concom_pct_highVar0.1@tax_table
+
+physeq_cls_concom_names_highVar0.1 <-
+  as.data.frame(physeq_cls_concom_pct_highVar0.1@tax_table)
+
+physeq_cls_concom_highVar0.1 <- subset_taxa(physeq_cls_concom, Class %in% physeq_cls_concom_names_highVar0.1$Class)
+
+physeq_cls_concom_highVar0.1@tax_table
+
+physeq_cls_concom_highVar0.1@otu_table
+
+physeq_cls_concom_highVar0.1_pct <-
+  physeq_cls_concom_highVar0.1 %>% 
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Bar_plot the datas (relative abundance of the most variating OTUs within 7 conditions)
+physeq_cls_concom_highVar0.1_pct %>% 
+  plot_bar(fill = "Class", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#c95479",
+"#67aa48",
+"#ab76b7",
+"#cf5738",
+"#4aac8d",
+"#816ed0",
+"#a0824d",
+"#c29e31"))
+
+```
+The taxonomical structure still quite similar between conditions, except for the bean bulk soil which contains a higher proportion of the Actinobacteria Class.
+
+####Orders
+#####Var > 0.1
+```{r}
+physeq_odr_concom_pct_highVar0.1 = 
+  filter_taxa(physeq_odr_concom_pct, 
+              function(x) var(x) > 0.1, TRUE)
+
+physeq_odr_concom_pct_highVar0.1@tax_table
+
+physeq_odr_concom_names_highVar0.1 <-
+  as.data.frame(physeq_odr_concom_pct_highVar0.1@tax_table)
+
+physeq_odr_concom_highVar0.1 <- subset_taxa(physeq_odr_concom, Order %in% physeq_odr_concom_names_highVar0.1$Order)
+
+physeq_odr_concom_highVar0.1@tax_table
+
+physeq_odr_concom_highVar0.1@otu_table
+
+physeq_odr_concom_highVar0.1_pct <-
+  physeq_odr_concom_highVar0.1 %>% 
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+physeq_odr_concom_highVar0.1_pct %>% 
+  plot_bar(fill = "Order", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#d93e64",
+"#4aaa86",
+"#d04aa3",
+"#739f4b",
+"#8064d8",
+"#bca32f",
+"#ac67bf",
+"#c26a3e",
+"#5d7dc8",
+"#c16472",
+"#7aa0d3",
+"#b96b9e"))
+
+```
+No clear differences when comparing monoculture and polyculture rhizo-microbiome according to the corresponding bulk soil.
+
+####Families
+#####Var > 0.5
+```{r}
+physeq_fmy_concom_pct_highVar0.5 = 
+  filter_taxa(physeq_fmy_concom_pct, 
+              function(x) var(x) > 0.5, TRUE)
+
+physeq_fmy_concom_pct_highVar0.5@tax_table
+
+physeq_fmy_concom_names_highVar0.5 <-
+  as.data.frame(physeq_fmy_concom_pct_highVar0.5@tax_table)
+
+physeq_fmy_concom_highVar0.5 <- subset_taxa(physeq_fmy_concom, Family %in% physeq_fmy_concom_names_highVar0.5$Family)
+
+physeq_fmy_concom_highVar0.5@tax_table
+
+physeq_fmy_concom_highVar0.5@otu_table
+
+physeq_fmy_concom_highVar0.5_pct <-
+  physeq_fmy_concom_highVar0.5 %>% 
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+physeq_fmy_concom_highVar0.5_pct %>% 
+  plot_bar(fill = "Family", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#d93e64",
+"#4aaa86",
+"#d04aa3",
+"#739f4b",
+"#8064d8",
+"#bca32f",
+"#ac67bf",
+"#c26a3e",
+"#5d7dc8",
+"#c16472",
+"#7aa0d3",
+"#b96b9e"))
+
+```
+Still no clear differences when comparing monoculture and polyculture rhizo-microbiome according to the corresponding bulk soil.
+
+####Genus
+#####Var > 0.5
+```{r}
+#var > 0.5 : all is the same, beside we put the variance thershold up to 0.5
+
+#Normalized sequences are regrouped by species and conditions (i.e different plant's rhizospheres and bulk soils), 
+physeq_gns_concom_pct_highVar0.5 = 
+  filter_taxa(physeq_gns_concom_pct, 
+              function(x) var(x) > 0.5, TRUE)
+
+#So We can take a look at the species names
+physeq_gns_concom_pct_highVar0.5@tax_table
+
+#Creating an atomic vector containing the names of those species 
+physeq_gns_concom_names_highVar0.5 <-
+  as.data.frame(physeq_gns_concom_pct_highVar0.5@tax_table)
+
+#We can now exctract those species from the unormalized sequences-data set (still regrouped by species and conditions)
+physeq_gns_concom_highVar0.5 <- subset_taxa(physeq_gns_concom, Genus %in% physeq_gns_concom_names_highVar0.5$Genus)
+
+#Take a look at the names (those we wanted, we made it !)
+physeq_gns_concom_highVar0.5@tax_table
+
+#Check the number of sequences (huge variance can results by presence of 0, which is something we don't want), but here there is no zero sequence OTU, so it's grand !
+physeq_gns_concom_highVar0.5@otu_table
+
+#Normalizing the sequences for visual comparison.
+physeq_gns_concom_highVar0.5_pct <-
+  physeq_gns_concom_highVar0.5 %>% 
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+#Bar_plot the datas (relative abundance of the 6 most variating species within 7 conditions)
+physeq_gns_concom_highVar0.5_pct %>% 
+  plot_bar(fill = "Genus", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#d93e64",
+"#4aaa86",
+"#d04aa3",
+"#739f4b",
+"#8064d8",
+"#bca32f",
+"#ac67bf",
+"#c26a3e",
+"#5d7dc8",
+"#c16472",
+"#7aa0d3",
+"#b96b9e"))
+
+```
+Still no clear differences when comparing monoculture and polyculture rhizo-microbiome according to the corresponding bulk soil.
+
+####Species
+#####Var > 0.5
+```{r}
+physeq_sps_concom_pct_highVar0.5 = 
+  filter_taxa(physeq_sps_concom_pct, 
+              function(x) var(x) > 0.5, TRUE)
+
+physeq_sps_concom_pct_highVar0.5@tax_table
+
+physeq_sps_concom_names_highVar0.5 <-
+  as.data.frame(physeq_sps_concom_pct_highVar0.5@tax_table)
+
+physeq_sps_concom_highVar0.5 <- subset_taxa(physeq_sps_concom, Species %in% physeq_sps_concom_names_highVar0.5$Species)
+
+physeq_sps_concom_highVar0.5@tax_table
+
+physeq_sps_concom_highVar0.5@otu_table
+
+physeq_sps_concom_highVar0.5_pct <-
+  physeq_sps_concom_highVar0.5 %>% 
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+physeq_sps_concom_highVar0.5_pct %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#c954b8",
+"#a3a934",
+"#8a5ed7",
+"#7a984e",
+"#5979d9",
+"#c9663c",
+"#3ebab5",
+"#c85979",
+"#4ca578",
+"#a46cb4",
+"#6a92cc"))
+
+```
+Still no clear differences when comparing monoculture and polyculture rhizo-microbiome according to the corresponding bulk soil.
+
+#####Var > 1 
+```{r}
+#var > 1 : all is the same, beside we put the variance thershold up to 1
+physeq_sps_concom_pct_highVar1 = 
+  filter_taxa(physeq_sps_concom_pct, 
+              function(x) var(x) > 1, TRUE)
+
+physeq_sps_concom_pct_highVar1@tax_table
+
+physeq_sps_concom_names_highVar1 <-
+  as.data.frame(physeq_sps_concom_pct_highVar1@tax_table)
+
+physeq_sps_concom_highVar1 <- subset_taxa(physeq_sps_concom, Species %in% physeq_sps_concom_names_highVar1$Species)
+
+physeq_sps_concom_highVar1@tax_table
+
+physeq_sps_concom_highVar1@otu_table
+
+physeq_sps_concom_highVar1_pct <-
+  physeq_sps_concom_highVar1 %>% 
+  transform_sample_counts(function(OTU) OTU/sum(OTU)*100 )
+
+physeq_sps_concom_highVar1_pct %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = "Relative abundance (%)")+
+  scale_fill_manual(values = c("#c85a83",
+"#7bac43",
+"#8d72c9",
+"#cf7233",
+"#4aac8d",
+"#a3814e"))
+```
+Still no clear differences when comparing monoculture and polyculture rhizo-microbiome according to the corresponding bulk soil.
+It's not easy to compare the taxonomical structure pattern between monoculture and polyculture rhizo-bulk microbiome. But when comparing rhizo-microbiome and the corresponding bulk soil microbiome we can't observe clear shifts between the monoculture and the polyculture condition.
+Maybe working on a way to normalize rhizo-microbiome structure with the corresponding bulk soil structure could be a good idea to make visualisation easier.
+
+##NMDS
+A common way to represent microbiome composition proximity between samples is the Nonmetric Multidimensional scaling (NMDS). The NMDS algorithm uses a distance matrix (here Unifrac distance measure was used) to map the samples in a two-dimensional ordination space.
+Colours indicate the soil origin (farmers) and shapes indicate culture conditions. Bulk soil samples are displayed as filled shapes, monoculture bean rhizosphere as circular empty shapes, maize rhizosphere as triangular empty shapes, and polyculture bean and maize rhizosphere as squares respectively containing verticale-horizontal cross and diagonal cross. 
+```{r}
+PSUF <- UniFrac(physeq)
+
+PS.NMDS <- ordinate(physeq, "NMDS", PSUF)
+
+plot_ordination(physeq, PS.NMDS, "samples", color="farmer2")+
+  geom_point(aes(shape = concom),size=8)+
+  scale_shape_manual(values = c(1,16,17,2,12,15,7))+
+  scale_color_manual(values = c("#ca5f45",
+"#aaa533",
+"#7e964e",
+"#4aac8b",
+"#7e87c4",
+"#706cd6",
+"#bf59b9",
+"#c65b84"))+
+  theme_classic()+
+  labs(shape = "Plant_Compartment", color = "Farmers")+
+  annotate("text", x = 0.25, y = 0.2, label = "2D stress : 0.143")
+```
+It seems that there is not any pattern of polyculture effect. Distances between bulk soil and rhizosphere, as well as monoculture and polyculture microbiome,  are different for every soil origin. But in the overall, samples can almost be differentiated on the farm origin.
+
+##Coinertie
+The coinertia analysis will provide the relationship between the soil parameters dataset and the OTU sequence counts dataset.Two separated pcas were run and coinertia find a couple of axes in each pca on which the samples are projected.
+###Soil acp
+```{r}
+sol <- meta_df1[,25:38]
+
+sol <- as.data.frame(sol)
+farmersol <- as.factor(meta_df1$farmer2)
+
+pcasoil <- dudi.pca(sol, scan = F, nf = 4)
+
+
+fviz_pca_ind(pcasoil,title="PCA Soil Parameters", label="none", habillage=meta_df1$farmer2)
+fviz_pca_var(pcasoil)
+fviz_pca_var(pcasoil, select.var = list(contrib = 3))
+```
+Here are the three soil parameters contributing the most to axe formation.
+So we can see that the most discriminant soil parameters are particle size (Coarse sands and fine silts) and nitrogen content (N).
+
+###OTUs pca
+```{r}
+pcaotus <- dudi.pca(otusmatt, scan = FALSE, scale = FALSE, nf = 3)
+
+fviz_pca_ind(pcaotus,
+             title="PCA OTUs", 
+             label="none", 
+             habillage = meta_df1$farmer2, addEllipses = TRUE)
+fviz_pca_var(pcaotus)
+fviz_pca_var(pcaotus, select.var = list(contrib = 3))
+```
+Here are the three OTUs (OTUs 6, 7, 1058) contributing the most to the 2 dimensions space formation.
+
+###coinertia
+Soil parameters-based projected samples are displayed in yellow. OTU sequences counts-based projected samples are displayed in blue.
+Coinertia strength can be estimated with a permutational test.
+```{r}
+coib <- coinertia(pcasoil, pcaotus, scannf = FALSE, nf = 2)
+
+s.match.class(coib$mX, coib$mY, farmersol, col1 = rep("orange",
+nlevels(farmersol)), col2 = rep("blue", nlevels(farmersol)),clabel = 0.5, cpoint = 0.6)
+
+
+perm3<-randtest(coib, nrepet = 10000)
+perm3
+```
+So here we can see that there is a strong relationship between the soil microbiome taxonomic structure and soil farm origin (underlying that soil parameters are different between farms). 
+
+##Venn
+  The Venn diagram calculates the number of OTUs shared and unshared between conditions. For this, only two sample sites were chosen, because they displayed maize and bean monocultures as well as polycultures. 
+```{r}
+tabven <- cbind(otusmatt, sampledata)
+
+tab_ma <- subset(tabven, concom =="maize _ maize-rhizo")
+tab_ma_rou <- subset(tab_ma, farmer == "ROUX")
+tab_ma_sol <- subset(tab_ma, farmer == "SOLLE")
+tab_ma_f <- tab_ma[,1:11829]
+tab_ma_rou_f <- tab_ma_rou[,1:11829]
+tab_ma_sol_f <- tab_ma_sol[,1:11829]
+
+tab_ha <- subset(tabven, concom == "bean _ bean-rhizo")
+tab_ha_rou <- subset(tab_ha, farmer == "ROUX")
+tab_ha_sol <- subset(tab_ha, farmer == "SOLLE")
+tab_ha_f <- tab_ha[,1:11829]
+tab_ha_rou_f <- tab_ha_rou[,1:11829]
+tab_ha_sol_f <- tab_ha_sol[,1:11829]
+
+tab_co <- subset(tabven, concom %in% c("maize+bean _ bean-rhizo", "maize+bean _ maize-rhizo"))
+tab_co_ma <- subset(tab_co, compartment == "maize-rhizo")
+tab_co_ha <- subset(tab_co, compartment == "bean-rhizo")
+tab_co_ma_rou <- subset(tab_co_ma, farmer == "ROUX")
+tab_co_ha_rou <- subset(tab_co_ha, farmer == "ROUX")
+tab_co_ma_sol <- subset(tab_co_ma, farmer == "SOLLE")
+tab_co_ha_sol <- subset(tab_co_ha, farmer == "SOLLE")
+
+tab_co_f <- tab_co[,1:11829]
+tab_co_ma_rou_f <- tab_co_ma_rou[,1:11829]
+tab_co_ha_rou_f <- tab_co_ha_rou[,1:11829]
+tab_co_ma_sol_f <- tab_co_ma_sol[,1:11829]
+tab_co_ha_sol_f <- tab_co_ha_sol[,1:11829]
+
+conditions1 <- data.frame(
+  maize = colSums(tab_ma_sol_f),
+  bean = colSums(tab_ha_sol_f),
+  maize_co = colSums(tab_co_ma_sol_f),
+  bean_co = colSums(tab_co_ha_sol_f))
+
+conditions1[conditions1 > 0] <- 1
+
+colvc1 <- c("#dfe43b","#58e859","#9deb37","#87a141")
+
+vc1 <- vennCounts(conditions1)
+vennDiagram(vc1, circle.col = colvc1)+
+  title(main = "Farmer So")
+
+conditions2 <- data.frame(
+  maize = colSums(tab_ma_rou_f),
+  bean = colSums(tab_ha_rou_f),
+  maize_co = colSums(tab_co_ma_rou_f),
+  bean_co = colSums(tab_co_ha_rou_f))
+
+conditions2[conditions2 > 0] <- 1
+
+colvc2 <- c("#dfe43b","#58e859","#9deb37","#87a141")
+
+vc2 <- vennCounts(conditions2)
+vennDiagram(vc2, circle.col = colvc2)+
+  title(main = "Farmer Ro")
+
+```
+First, we looked at the "farmer So" samples, where bean shows a lot (778) of unshared OTUs compared to the maize (454). 
+	Not much is shared only between maize and bean monoculture (211) as well as polyculture (212) condition. 
+	Bean monoculture condition shares less OTUs with bean coculture (199) than maize monoculture and polyculture (303). 
+	In total, bean and maize monoculture shared 2817 OTUs (211+408+2053+145). Bean and maize polyculture shared 2870 OTUs (212+371+2053+234). 
+	Therefore, maize and bean rhizosphere don't share more OTUs when they are grown together. 
+	But interestingly, unlike the monoculture condition, the maize coculture-condition rhizosphere showed a higher number of unshared OTUs (753) compared to bean rhizosphere (370).
+  
+	The "Farmer Ro" samples showed a quite similar number of unshared sequences between bean (699) and maize (732) monoculture condition.
+	Maize and bean monoculture condition shared less OTUs (258) than polyculture condition (340).
+	In this case, bean mono and polyculture conditions shared more OTUs (278) than the maize same conditions (179). 
+	In total, bean and maize monoculture shared 2778 OTUs (258+146+2046+358). Bean and maize polyculture shared 3066 OTUs (340+307+2046+373). 
+	Hence, again, there is not a great difference between the number of shared OTUs from monoculture and polyculture conditions. And at the opposite of "Farmer So" location, the maize coculture-condition showed a lower number of unshared OTUs (462) compared to bean rhizosphere (804).
+	This is maybe resulting from the different plant varieties grown. The PO725 maize variety was used for both monoculture and polyculture at the Ro location, but LG30597 and LG3264 maize varieties were used at the So site, respectively for polyculture and monoculture conditions. Alaric et Lapujole bean varieties were used at both locations respectively for polyculture and monoculture conditions.
+	 This suggests that the coculture effect on the rhizo-microbiome could be variety-species (or even variety-strains) dependent.
+	 
+##DESeq2
+DESeq2 is a bioconductor package for R software, providing a method for differential analysis of count data. Basically, the null hypothesis that the logarithmic fold change between treatments for OTU sequence counts is exactly zero.  generated p-values are then adjusted with a False Discovery Rate method (method of Benjamini, Hochberg and Yekutieli).
+
+###maize_maize-rhizo vs maize+brean_maize-rhizo padj
+Here we tested the coculture treatment effect on the maize rhizo-microbiome against the monoculture controle.
+To increase the test power, we reduced the FDR correction stringency by filtering OTUs rarely counted within the dataset. Here, 5 samples of each treatment and control are available (i.e. a total of 10 samples). We chose to remove OTUs cumulating less than 15 sequences within the 10 samples and absent from more than 6 samples. 
+```{r}
+
+mamomaco <- subset_samples(physeq, concom %in% c("maize _ maize-rhizo", "maize+bean _ maize-rhizo"))
+mamomaco <- subset_samples(mamomaco, farmer3 %in% c("Ro", "Ga", "So", "Ca", "De+Go"))
+
+meta_data_mamomaco <- mamomaco@sam_data
+meta_data_mamomaco <- meta_data_mamomaco[,"condition"]
+colnames(meta_data_mamomaco) <- c("culture")
+meta_data_mamomaco <- as.data.frame(meta_data_mamomaco)
+
+tax <- as.data.frame(mamomaco@tax_table)
+```
+
+###Phylum level
+According to the exploratory analysis ran above and the PERMANOVA, ran bellow, we do not expect to detect any significative OTU sequence-count changes at the "Phylum" taxonomic level. But it costs nothing to give it a try.
+```{r}
+mamomaco_plm <- tax_glom(mamomaco, taxrank = "Phylum")
+
+maize_plm <- as.data.frame (mamomaco_plm@otu_table)
+
+maize_plm_sup15 <- maize_plm[rowSums(maize_plm) > 15,]
+
+maize_plm_sup15_max6 <- maize_plm_sup15[rowSums(maize_plm_sup15 ==0) <= 6,]
+
+tax_mamomaco_plm_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_plm_sup15_max6))
+
+mmvsmc_plm_s15m6 <- DESeqDataSetFromMatrix(maize_plm_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+
+mmvsmc_plm_s15m6 <- DESeq(mmvsmc_plm_s15m6)
+
+mmvsmc_plm_s15m6_res <- results(mmvsmc_plm_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+plm_maize_s15m6_sigtab = mmvsmc_plm_s15m6_res[which(mmvsmc_plm_s15m6_res$padj <= alpha), ]
+
+plm_maize_s15m6_sigtab
+```
+As expected, none of the calculated p-values (adjusted) is above the 5 percents threshold. 
+
+#####High variance
+As it has been done for visualisation analysis, we can also try to increase the test power by filtering low variance OTUs.
+```{r}
+mamomaco_plm_highVar0.5 = 
+  filter_taxa(mamomaco_plm, 
+              function(x) var(x) > 0.5, TRUE)
+
+maize_plm_highVar0.5 <- as.data.frame (mamomaco_plm_highVar0.5@otu_table)
+
+maize_plm_highVar0.5_sup15 <- maize_plm_highVar0.5[rowSums(maize_plm_highVar0.5) > 15,]
+
+maize_plm_highVar0.5_sup15_max6 <- maize_plm_highVar0.5_sup15[rowSums(maize_plm_highVar0.5_sup15 ==0) <= 6,]
+
+tax_maize_plm_highVar0.5_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_plm_highVar0.5_sup15_max6))
+
+mmvsmc_hv_plm_s15m6 <- DESeqDataSetFromMatrix(maize_plm_highVar0.5_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+
+mmvsmc_hv_plm_s15m6 <- DESeq(mmvsmc_hv_plm_s15m6)
+
+mmvsmc_hv_plm_s15m6_res <- results(mmvsmc_hv_plm_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+plm_maize_hv_s15m6_sigtab = mmvsmc_hv_plm_s15m6_res[which(mmvsmc_hv_plm_s15m6_res$padj <= alpha), ]
+
+plm_maize_hv_s15m6_sigtab
+
+```
+Still no p-values (adjusted) above the 5 percents threshold.
+
+###Class level
+```{r}
+mamomaco_cls <- tax_glom(mamomaco, taxrank = "Class")
+
+maize_cls <- as.data.frame (mamomaco_cls@otu_table)
+
+maize_cls_sup15 <- maize_cls[rowSums(maize_cls) > 15,]
+
+maize_cls_sup15_max6 <- maize_cls_sup15[rowSums(maize_cls_sup15 ==0) <= 6,]
+
+tax_mamomaco_cls_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_cls_sup15_max6))
+
+mmvsmc_cls_s15m6 <- DESeqDataSetFromMatrix(maize_cls_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+mmvsmc_cls_s15m6 <- DESeq(mmvsmc_cls_s15m6)
+
+mmvsmc_cls_s15m6_res <- results(mmvsmc_cls_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+cls_maize_s15m6_sigtab = mmvsmc_cls_s15m6_res[which(mmvsmc_cls_s15m6_res$padj <= alpha), ]
+
+cls_maize_s15m6_sigtab
+```
+Not surprisingly, no p-values (adjusted) above the 5 percents threshold.
+
+#####High variance
+```{r}
+mamomaco_cls_highVar0.5 = 
+  filter_taxa(mamomaco_cls, 
+              function(x) var(x) > 0.5, TRUE)
+
+maize_cls_highVar0.5 <- as.data.frame (mamomaco_cls_highVar0.5@otu_table)
+
+maize_cls_highVar0.5_sup15 <- maize_cls_highVar0.5[rowSums(maize_cls_highVar0.5) > 15,]
+
+maize_cls_highVar0.5_sup15_max6 <- maize_cls_highVar0.5_sup15[rowSums(maize_cls_highVar0.5_sup15 ==0) <= 6,]
+
+tax_maize_cls_highVar0.5_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_cls_highVar0.5_sup15_max6))
+
+mmvsmc_hv_cls_s15m6 <- DESeqDataSetFromMatrix(maize_cls_highVar0.5_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+
+mmvsmc_hv_cls_s15m6 <- DESeq(mmvsmc_hv_cls_s15m6)
+
+mmvsmc_hv_cls_s15m6_res <- results(mmvsmc_hv_cls_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+cls_maize_hv_s15m6_sigtab = mmvsmc_hv_cls_s15m6_res[which(mmvsmc_hv_cls_s15m6_res$padj <= alpha), ]
+
+cls_maize_hv_s15m6_sigtab
+
+```
+Still no p-values (adjusted) above the 5 percents threshold.
+
+###Order level
+```{r}
+mamomaco_odr <- tax_glom(mamomaco, taxrank = "Order")
+
+maize_odr <- as.data.frame (mamomaco_odr@otu_table)
+
+maize_odr_sup15 <- maize_odr[rowSums(maize_odr) > 15,]
+
+maize_odr_sup15_max6 <- maize_odr_sup15[rowSums(maize_odr_sup15 ==0) <= 6,]
+
+tax_mamomaco_odr_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_odr_sup15_max6))
+
+mmvsmc_odr_s15m6 <- DESeqDataSetFromMatrix(maize_odr_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+mmvsmc_odr_s15m6 <- DESeq(mmvsmc_odr_s15m6)
+
+mmvsmc_odr_s15m6_res <- results(mmvsmc_odr_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+odr_maize_s15m6_sigtab = mmvsmc_odr_s15m6_res[which(mmvsmc_odr_s15m6_res$padj <= alpha), ]
+
+odr_maize_s15m6_sigtab
+
+```
+Still no p-values (adjusted) above the 5 percents threshold.
+
+#####High variance
+```{r}
+mamomaco_odr_highVar0.5 = 
+  filter_taxa(mamomaco_odr, 
+              function(x) var(x) > 0.5, TRUE)
+
+maize_odr_highVar0.5 <- as.data.frame (mamomaco_odr_highVar0.5@otu_table)
+
+maize_odr_highVar0.5_sup15 <- maize_odr_highVar0.5[rowSums(maize_odr_highVar0.5) > 15,]
+
+maize_odr_highVar0.5_sup15_max6 <- maize_odr_highVar0.5_sup15[rowSums(maize_odr_highVar0.5_sup15 ==0) <= 6,]
+
+tax_maize_odr_highVar0.5_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_odr_highVar0.5_sup15_max6))
+
+mmvsmc_hv_odr_s15m6 <- DESeqDataSetFromMatrix(maize_odr_highVar0.5_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+mmvsmc_hv_odr_s15m6 <- DESeq(mmvsmc_hv_odr_s15m6)
+
+mmvsmc_hv_odr_s15m6_res <- results(mmvsmc_hv_odr_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+odr_maize_hv_s15m6_sigtab = mmvsmc_hv_odr_s15m6_res[which(mmvsmc_hv_odr_s15m6_res$padj <= alpha), ]
+
+odr_maize_hv_s15m6_sigtab
+```
+Still no p-values (adjusted) above the 5 percents threshold.
+
+###Family level
+```{r}
+mamomaco_fmy <- tax_glom(mamomaco, taxrank = "Family")
+
+maize_fmy <- as.data.frame (mamomaco_fmy@otu_table)
+
+maize_fmy_sup15 <- maize_fmy[rowSums(maize_fmy) > 15,]
+
+maize_fmy_sup15_max6 <- maize_fmy_sup15[rowSums(maize_fmy_sup15 ==0) <= 6,]
+
+tax_mamomaco_fmy_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_fmy_sup15_max6))
+
+mmvsmc_fmy_s15m6 <- DESeqDataSetFromMatrix(maize_fmy_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+mmvsmc_fmy_s15m6 <- DESeq(mmvsmc_fmy_s15m6)
+
+mmvsmc_fmy_s15m6_res <- results(mmvsmc_fmy_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+fmy_maize_s15m6_sigtab = mmvsmc_fmy_s15m6_res[which(mmvsmc_fmy_s15m6_res$padj <= alpha), ]
+
+fmy_maize_s15m6_sigtab
+
+#Up
+
+fmy_maize_s15m6_sigtab_up <- fmy_maize_s15m6_sigtab[which(fmy_maize_s15m6_sigtab@listData$log2FoldChange > 0),]
+
+cbind(head(fmy_maize_s15m6_sigtab_up[order(fmy_maize_s15m6_sigtab_up$padj),]), tax[row.names(head(fmy_maize_s15m6_sigtab_up[order(fmy_maize_s15m6_sigtab_up$padj),])),2:7])
+plots.list <- lapply(row.names(head(fmy_maize_s15m6_sigtab_up[order(fmy_maize_s15m6_sigtab_up$padj),])),
+                     function(x) {
+                       d <- plotCounts(mmvsmc_fmy_s15m6, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Family"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+Here the *Rickettsiaceae* family sequence-count is significantly higher in the polyculture maize rhizosphere treatment than in the monoculture maize rhizosphere. But 
+
+Since we do not have any method for normalizing OTU sequence-count from treatment according to the corresponding bulk soil, it's necessary to check if there is a similar number of sequences of the considered OTU between bulk soil and treatment.
+```{r}
+ma_fa <- tax_glom(physeq, taxrank = "Family")
+ma_fa <- subset_samples(ma_fa, condition != "bean")
+ma_fa <- subset_samples(ma_fa, compartment != "bean-rhizo")
+ma_fa_concom <- merge_samples(ma_fa, "concom")
+ma_fa_concom@sam_data$concom = c("maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+ma_fa_concom_ric <- subset_taxa(ma_fa_concom,Family =="rickettsiaceae")
+
+ma_fa_concom_ric %>% 
+  plot_bar(fill = "Family", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+The monoculture samples display a very low number of *Rickettsiaceae* family sequences, either within the bulk soil and in maize rhizosphere. There is a big difference between monoculture and polyculture bulk soils in term of Rickettsiaceae sequence abundance. So it's hard to determine if the *Rickettsiaceae* family is more abundant in polyculture maize rhizosphere than in monoculture because of the treatment or because of the soil physicochemical proprieties. 
+
+We can check what happens for the mono and polyculture bean treatments.
+```{r}
+be_fa <- tax_glom(physeq, taxrank = "Family")
+be_fa <- subset_samples(be_fa, condition != "maize")
+be_fa <- subset_samples(be_fa, compartment != "maize-rhizo")
+be_fa_concom <- merge_samples(be_fa, "concom")
+be_fa_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize+bean _ bean-rhizo", "maize+bean _ bulk")
+
+be_fa_concom_ric <- subset_taxa(be_fa_concom,Family =="rickettsiaceae")
+
+be_fa_concom_ric %>% 
+  plot_bar(fill = "Family", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+It's interesting that even with a really low *Rickettsiaceae* abundance in the monoculture bulk soil, this abundance is fairly high in the monoculture-bean rhizosphere. Also, the abundance in the rhizosphere samples is lower for the polyculture treatment, while the polyculture bulk soil shows a higher abundance that the monoculture one. 
+
+#####High variance
+```{r}
+mamomaco_fmy_highVar0.5 = 
+  filter_taxa(mamomaco_fmy, 
+              function(x) var(x) > 0.5, TRUE)
+
+maize_fmy_highVar0.5 <- as.data.frame (mamomaco_fmy_highVar0.5@otu_table)
+
+maize_fmy_highVar0.5_sup15 <- maize_fmy_highVar0.5[rowSums(maize_fmy_highVar0.5) > 15,]
+
+maize_fmy_highVar0.5_sup15_max6 <- maize_fmy_highVar0.5_sup15[rowSums(maize_fmy_highVar0.5_sup15 ==0) <= 6,]
+
+tax_maize_fmy_highVar0.5_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_fmy_highVar0.5_sup15_max6))
+
+mmvsmc_hv_fmy_s15m6 <- DESeqDataSetFromMatrix(maize_fmy_highVar0.5_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+
+mmvsmc_hv_fmy_s15m6 <- DESeq(mmvsmc_hv_fmy_s15m6)
+
+mmvsmc_hv_fmy_s15m6_res <- results(mmvsmc_hv_fmy_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+fmy_maize_hv_s15m6_sigtab = mmvsmc_hv_fmy_s15m6_res[which(mmvsmc_hv_fmy_s15m6_res$padj <= alpha), ]
+
+fmy_maize_hv_s15m6_sigtab
+
+fmy_maize_hv_s15m6_sigtab_up <- fmy_maize_hv_s15m6_sigtab[which(fmy_maize_hv_s15m6_sigtab@listData$log2FoldChange > 0),]
+
+cbind(head(fmy_maize_hv_s15m6_sigtab_up[order(fmy_maize_hv_s15m6_sigtab_up$padj),]), tax_maize_fmy_highVar0.5_sup15_max6[row.names(head(fmy_maize_hv_s15m6_sigtab_up[order(fmy_maize_hv_s15m6_sigtab_up$padj),])),2:7])
+plots.list <- lapply(row.names(head(fmy_maize_hv_s15m6_sigtab_up[order(fmy_maize_hv_s15m6_sigtab_up$padj),])),
+                     function(x) {
+                       d <- plotCounts(mmvsmc_hv_fmy_s15m6, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Family"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+```
+Same result than without filter.
+
+###Genus level
+```{r}
+mamomaco_gns <- tax_glom(mamomaco, taxrank = "Genus")
+
+maize_gns <- as.data.frame (mamomaco_gns@otu_table)
+
+maize_gns_sup15 <- maize_gns[rowSums(maize_gns) > 15,]
+
+maize_gns_sup15_max6 <- maize_gns_sup15[rowSums(maize_gns_sup15 ==0) <= 6,]
+
+tax_mamomaco_gns_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_gns_sup15_max6))
+
+mmvsmc_gns_s15m6 <- DESeqDataSetFromMatrix(maize_gns_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+mmvsmc_gns_s15m6 <- DESeq(mmvsmc_gns_s15m6)
+
+mmvsmc_gns_s15m6_res <- results(mmvsmc_gns_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+gns_maize_s15m6_sigtab = mmvsmc_gns_s15m6_res[which(mmvsmc_gns_s15m6_res$padj <= alpha), ]
+
+gns_maize_s15m6_sigtab
+
+#Up
+
+gns_maize_s15m6_sigtab_up <- gns_maize_s15m6_sigtab[which(gns_maize_s15m6_sigtab@listData$log2FoldChange > 0),]
+
+cbind(head(gns_maize_s15m6_sigtab_up[order(gns_maize_s15m6_sigtab_up$padj),]), tax[row.names(head(gns_maize_s15m6_sigtab_up[order(gns_maize_s15m6_sigtab_up$padj),])),2:7])
+plots.list <- lapply(row.names(head(gns_maize_s15m6_sigtab_up[order(gns_maize_s15m6_sigtab_up$padj),])),
+                     function(x) {
+                       d <- plotCounts(mmvsmc_gns_s15m6, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Genus"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+So this is probably the Rickettsia family member which is responsible for the biggest part of the result observed above.
+
+```{r}
+ma_ge <- tax_glom(physeq, taxrank = "Genus")
+ma_ge <- subset_samples(ma_ge, condition != "bean")
+ma_ge <- subset_samples(ma_ge, compartment != "bean-rhizo")
+ma_ge_concom <- merge_samples(ma_ge, "concom")
+ma_ge_concom@sam_data$concom = c("maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+ma_ge_concom_ric <- subset_taxa(ma_ge_concom,Genus =="orientia")
+
+ma_ge_concom_ric %>% 
+  plot_bar(fill = "Genus", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_ge <- tax_glom(physeq, taxrank = "Genus")
+be_ge <- subset_samples(be_ge, condition != "maize")
+be_ge <- subset_samples(be_ge, compartment != "maize-rhizo")
+be_ge_concom <- merge_samples(be_ge, "concom")
+be_ge_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize+bean _ bean-rhizo", "maize+bean _ bulk")
+
+be_ge_concom_ric <- subset_taxa(be_ge_concom,Genus =="orientia")
+
+be_ge_concom_ric %>% 
+  plot_bar(fill = "Genus", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+And the same pattern is observed that for the Rickettsia family.
+
+#####High variance
+```{r}
+mamomaco_gns_highVar0.5 = 
+  filter_taxa(mamomaco_gns, 
+              function(x) var(x) > 0.5, TRUE)
+
+maize_gns_highVar0.5 <- as.data.frame (mamomaco_gns_highVar0.5@otu_table)
+
+maize_gns_highVar0.5_sup15 <- maize_gns_highVar0.5[rowSums(maize_gns_highVar0.5) > 15,]
+
+maize_gns_highVar0.5_sup15_max6 <- maize_gns_highVar0.5_sup15[rowSums(maize_gns_highVar0.5_sup15 ==0) <= 6,]
+
+tax_maize_gns_highVar0.5_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_gns_highVar0.5_sup15_max6))
+
+mmvsmc_hv_gns_s15m6 <- DESeqDataSetFromMatrix(maize_gns_highVar0.5_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+mmvsmc_hv_gns_s15m6 <- DESeq(mmvsmc_hv_gns_s15m6)
+
+mmvsmc_hv_gns_s15m6_res <- results(mmvsmc_hv_gns_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+gns_maize_hv_s15m6_sigtab = mmvsmc_hv_gns_s15m6_res[which(mmvsmc_hv_gns_s15m6_res$padj <= alpha), ]
+
+gns_maize_hv_s15m6_sigtab
+
+gns_maize_hv_s15m6_sigtab_up <- gns_maize_hv_s15m6_sigtab[which(gns_maize_hv_s15m6_sigtab@listData$log2FoldChange > 0),]
+
+cbind(head(gns_maize_hv_s15m6_sigtab_up[order(gns_maize_hv_s15m6_sigtab_up$padj),]), tax[row.names(head(gns_maize_hv_s15m6_sigtab_up[order(gns_maize_hv_s15m6_sigtab_up$padj),])),2:7])
+plots.list <- lapply(row.names(head(gns_maize_hv_s15m6_sigtab_up[order(gns_maize_hv_s15m6_sigtab_up$padj),])),
+                     function(x) {
+                       d <- plotCounts(mmvsmc_hv_gns_s15m6, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Genus"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+```
+The result that without filtering.
+
+###Species level
+```{r}
+mamomaco_sps <- tax_glom(mamomaco, taxrank = "Species")
+
+maize_sps <- as.data.frame (mamomaco_sps@otu_table)
+
+maize_sps_sup15 <- maize_sps[rowSums(maize_sps) > 15,]
+
+maize_sps_sup15_max6 <- maize_sps_sup15[rowSums(maize_sps_sup15 ==0) <= 6,]
+
+tax_maize_sps_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_sps_sup15_max6))
+
+mmvsmc_sps_s15m6 <- DESeqDataSetFromMatrix(maize_sps_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+
+mmvsmc_sps_s15m6 <- DESeq(mmvsmc_sps_s15m6)
+
+mmvsmc_sps_s15m6_res <- results(mmvsmc_sps_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+sps_maize_s15m6_sigtab = mmvsmc_sps_s15m6_res[which(mmvsmc_sps_s15m6_res$padj <= alpha), ]
+
+sps_maize_s15m6_sigtab
+
+#Up
+
+sps_maize_s15m6_sigtab_up <- sps_maize_s15m6_sigtab[which(sps_maize_s15m6_sigtab@listData$log2FoldChange > 0),]
+
+cbind(head(sps_maize_s15m6_sigtab_up[order(sps_maize_s15m6_sigtab_up$padj),]), tax[row.names(head(sps_maize_s15m6_sigtab_up[order(sps_maize_s15m6_sigtab_up$padj),])),2:7])
+plots.list <- lapply(row.names(head(sps_maize_s15m6_sigtab_up[order(sps_maize_s15m6_sigtab_up$padj),])),
+                     function(x) {
+                       d <- plotCounts(mmvsmc_sps_s15m6, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Species"]) +
+                         theme(legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+Interestingly, this specie is an obligate intracellular bacterium, known for causing Scrub Typhus, it can be found in soil among his vector microbiome, trombiculid mites (Alison Luce-Fedrow et al., 2017,  Rawadee Kumlert et al 2018). Hopefully, this is an annotation error, resulting in attributing the wrong genus to those sequences. If it's not, it could be a bad new for the polyculture farmers near Tarbes, but I never heard about important rickettsiosis outbreak in France.
+
+```{r}
+#Down
+
+sps_maize_s15m6_sigtab_down <- sps_maize_s15m6_sigtab[which(sps_maize_s15m6_sigtab@listData$log2FoldChange < 0),]
+
+cbind(head(sps_maize_s15m6_sigtab_down[order(sps_maize_s15m6_sigtab_down$padj),]), tax[row.names(head(sps_maize_s15m6_sigtab_down[order(sps_maize_s15m6_sigtab_down$padj),])),2:7])
+plots.list <- lapply(row.names(head(sps_maize_s15m6_sigtab_down[order(sps_maize_s15m6_sigtab_down$padj),])),
+                     function(x) {
+                       d <- plotCounts(mmvsmc_sps_s15m6, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Species"]) +
+                         theme(legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+
+```{r}
+ma_sp <- tax_glom(physeq, taxrank = "Species")
+ma_sp <- subset_samples(ma_sp, condition != "bean")
+ma_sp <- subset_samples(ma_sp, compartment != "bean-rhizo")
+ma_sp_concom <- merge_samples(ma_sp, "concom")
+ma_sp_concom@sam_data$concom = c("maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+ma_sp_concom_ped <- subset_taxa(ma_sp_concom,Species =="pedobacter daejeonensis")
+
+ma_sp_concom_ped %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_sp <- tax_glom(physeq, taxrank = "Species")
+be_sp <- subset_samples(be_sp, condition != "maize")
+be_sp <- subset_samples(be_sp, compartment != "maize-rhizo")
+be_sp_concom <- merge_samples(be_sp, "concom")
+be_sp_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize+bean _ bean-rhizo", "maize+bean _ bulk")
+
+be_sp_concom_ped <- subset_taxa(be_sp_concom,Species =="pedobacter daejeonensis")
+
+be_sp_concom_ped %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+According to the analysis, the Specie "*pedobacter daejeonensis*" abundance decrease under polyculture treatment. The maize monoculture condition displays a higher amount of sequences in the rhizosphere compartment than in the bulk soil. But it's clearly the opposite for the polyculture condition. 
+	When looking at the bean monoculture condition, the *pedobacter daejeonensis* abundance is almost the same in the rhizosphere compartment and the bulk soil. For the polyculture treatment, this specie abundance is clearly lower within the rhizosphere compartment than within the bulk soil. 
+	Given those results, since the *pedobacter daejeonensis* abundance is almost equal within the bulk soil and rhizosphere compartment for the bean monoculture condition, this specie seems not to be counter selected by the bean rhizosphere, but just not particularly attracted. Hence, the decreased abundance of this specie within the maize rhizosphere compartment under polyculture treatment could be the result of a maize-rhizodeposits dilution by the bean rhizodeposits, ineffective in stimulating this OTU.  
+
+#####High variance
+```{r}
+mamomaco_sps_highVar0.5 = 
+  filter_taxa(mamomaco_sps, 
+              function(x) var(x) > 0.5, TRUE)
+
+maize_sps_highVar0.5 <- as.data.frame (mamomaco_sps_highVar0.5@otu_table)
+
+maize_sps_highVar0.5_sup15 <- maize_sps_highVar0.5[rowSums(maize_sps_highVar0.5) > 15,]
+
+maize_sps_highVar0.5_sup15_max6 <- maize_sps_highVar0.5_sup15[rowSums(maize_sps_highVar0.5_sup15 ==0) <= 6,]
+
+tax_maize_sps_highVar0.5_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_sps_highVar0.5_sup15_max6))
+
+mmvsmc_hv_sps_s15m6 <- DESeqDataSetFromMatrix(maize_sps_highVar0.5_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+mmvsmc_hv_sps_s15m6 <- DESeq(mmvsmc_hv_sps_s15m6)
+
+mmvsmc_hv_sps_s15m6_res <- results(mmvsmc_hv_sps_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+sps_maize_hv_s15m6_sigtab = mmvsmc_hv_sps_s15m6_res[which(mmvsmc_hv_sps_s15m6_res$padj <= alpha), ]
+
+sps_maize_hv_s15m6_sigtab
+
+#Up
+
+sps_maize_hv_s15m6_sigtab_up <- sps_maize_hv_s15m6_sigtab[which(sps_maize_hv_s15m6_sigtab@listData$log2FoldChange > 0),]
+
+cbind(head(sps_maize_hv_s15m6_sigtab_up[order(sps_maize_hv_s15m6_sigtab_up$padj),]), tax[row.names(head(sps_maize_hv_s15m6_sigtab_up[order(sps_maize_hv_s15m6_sigtab_up$padj),])),2:7])
+plots.list <- lapply(row.names(head(sps_maize_hv_s15m6_sigtab_up[order(sps_maize_hv_s15m6_sigtab_up$padj),])),
+                     function(x) {
+                       d <- plotCounts(mmvsmc_hv_sps_s15m6, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Species"]) +
+                         theme(legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+#Down
+
+sps_maize_hv_s15m6_sigtab_down <- sps_maize_hv_s15m6_sigtab[which(sps_maize_hv_s15m6_sigtab@listData$log2FoldChange < 0),]
+
+cbind(head(sps_maize_hv_s15m6_sigtab_down[order(sps_maize_hv_s15m6_sigtab_down$padj),]), tax[row.names(head(sps_maize_hv_s15m6_sigtab_down[order(sps_maize_hv_s15m6_sigtab_down$padj),])),2:7])
+plots.list <- lapply(row.names(head(sps_maize_hv_s15m6_sigtab_down[order(sps_maize_hv_s15m6_sigtab_down$padj),])),
+                     function(x) {
+                       d <- plotCounts(mmvsmc_hv_sps_s15m6, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Species"]) +
+                         theme(legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+Same pettern than without filtering.
+
+###OTU level
+```{r}
+maize_otus <- as.data.frame (mamomaco@otu_table)
+
+maize_otus_sup15 <- maize_otus[rowSums(maize_otus) > 15,]
+
+maize_otus_sup15_max6 <- maize_otus_sup15[
+  rowSums(maize_otus_sup15 == 0)
+  <= 6,]
+
+tax_mmvsmc_otus_sup15_m6 <- subset(tax, rownames(tax) %in% rownames(maize_otus_sup15_max6))
+
+mmvsmc_otus_s15m6 <- DESeqDataSetFromMatrix(maize_otus_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+mmvsmc_otus_s15m6 <- DESeq(mmvsmc_otus_s15m6)
+
+mmvsmc_otus_s15m6_res <- results(mmvsmc_otus_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+otus_maize_s15m6_sigtab = mmvsmc_otus_s15m6_res[which(mmvsmc_otus_s15m6_res$padj <= alpha), ]
+
+otus_maize_s15m6_sigtab
+
+#UP
+otus_maize_s15m6_sigtab_up <- otus_maize_s15m6_sigtab[which(otus_maize_s15m6_sigtab@listData$log2FoldChange > 0),]
+
+cbind(head(otus_maize_s15m6_sigtab_up[order(otus_maize_s15m6_sigtab_up$padj),]), tax[row.names(head(otus_maize_s15m6_sigtab_up[order(otus_maize_s15m6_sigtab_up$padj),])),2:7])
+plots.list <- lapply(row.names(head(otus_maize_s15m6_sigtab_up[order(otus_maize_s15m6_sigtab_up$padj),])),
+                     function(x) {
+                       d <- plotCounts(mmvsmc_otus_s15m6, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Species"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+
+```{r}
+ma_otu <- subset_samples(physeq, condition != "bean")
+ma_otu <- subset_samples(ma_otu, compartment != "bean-rhizo")
+ma_otu_concom <- merge_samples(ma_otu, "concom")
+ma_otu_concom@sam_data$concom = c("maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+ma_otu_concom_met <- prune_taxa("OTU485", ma_otu_concom)
+
+ma_otu_concom_met %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_otu <- subset_samples(physeq, condition != "maize")
+be_otu <- subset_samples(be_otu, compartment != "maize-rhizo")
+be_otu_concom <- merge_samples(be_otu, "concom")
+be_otu_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize+bean _ bean-rhizo", "maize+bean _ bulk")
+
+be_otu_concom_met <- prune_taxa("OTU485", be_otu_concom)
+
+be_otu_concom_met %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+  Here, the interpretation is still uncertain. Two reasons could explain why both bean and maize rhizosphere under polyculture treatment display a higher abundance of this OTU than under monoculture treatment. Firstly, because the bulk soil for both maize and bean monoculture is not attractive for this OTU, then even if those plant rhizospheres are attractive for this OTU, the surrounding environment (which is soil) is not welcoming.
+	Secondly, the physicochemical soil proprieties could not be responsible for this abundance difference, but rhizodeposit mix could. That would mean that this OTU needs a more complex nutrient mix than it can find within a monoculture rhizosphere compartment. To choose between those two hypotheses, an isolation work for this particular OTU is needed. Then a mock community greenhouse experiment (with homogeneous soil physicochemical proprieties) could be conducted to verify whether this OTU can thrive as well within a monoculture rhizosphere than within polyculture rhizospheres.
+	
+```{r}
+ma_otu_concom_ortsu <- prune_taxa("OTU198", ma_otu_concom)
+
+ma_otu_concom_ortsu %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_otu_concom_ortsu <- prune_taxa("OTU198", be_otu_concom)
+
+be_otu_concom_ortsu %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+The same pattern is observed for the OTU198 than for its higher taxonomical rank (*Orientia tsutsugamushi*).
+
+```{r}
+ma_otu_concom_pedsp <- prune_taxa("OTU6878", ma_otu_concom)
+
+ma_otu_concom_pedsp %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_otu_concom_pedsp <- prune_taxa("OTU6878", be_otu_concom)
+
+be_otu_concom_pedsp %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+About the OTU6878, (a member of one of the *Pedobacter* species) a quite similar pattern is observed that for the OTU485 (*Methylobacterium agile*).    except that the monoculture bulk soil displays more sequences. Also here the difference between mono and polyculture bulk soil - rhizosphere ratio is higher for the bean. That means that maize rhizosphere seems to contain more sequences of that OTU for both mono and polyculture treatment.
+	But in the case of the bean, monoculture bulk soil and bean rhizosphere exhibit almost the same amount of sequences, whereas polyculture bean rhizosphere shows a net increase of OTU6878 sequences compared to bulk soil. Altogether, those result could suggest that the bean rhizosphere could have been enriched in OTU6878 because of the maize rhizosphere proximity. 
+
+```{r}
+#DOwn
+otus_maize_s15m6_sigtab_down <- otus_maize_s15m6_sigtab[which(otus_maize_s15m6_sigtab@listData$log2FoldChange < 0),]
+
+cbind(otus_maize_s15m6_sigtab_down[order(otus_maize_s15m6_sigtab_down$padj),], tax[row.names(otus_maize_s15m6_sigtab_down[order(otus_maize_s15m6_sigtab_down$padj),]),2:7])
+plots.list <- lapply(row.names(otus_maize_s15m6_sigtab_down[order(otus_maize_s15m6_sigtab_down$padj),]),
+                     function(x) {
+                       d <- plotCounts(mmvsmc_otus_s15m6, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Species"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+```
+
+```{r}
+ma_otu_concom_chispp <- prune_taxa("OTU102", ma_otu_concom)
+
+ma_otu_concom_chispp %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_otu_concom_chispp <- prune_taxa("OTU102", be_otu_concom)
+
+be_otu_concom_chispp %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+  The case of the OTU102 is interesting because it's the opposite of what we observed just above. Indeed, more sequences from this OTU were detected within the monoculture maize rhizosphere that within the corresponding bulk soil. But under polyculture condition, the number of sequences from this OTU is clearly lower within the maize rhizosphere compartment that within the corresponding bulk soil. When looking to the bean rhizosphere, for both mono and polyculture treatments, bean rhizosphere displayed a smaller number of sequences from this OTU that the corresponding bulk soil. 
+	Suggesting that beans could somehow counter select the OTU102 within the rhizosphere compartment and that this ability persisted under polyculture condition. 
+
+```{r}
+ma_otu_concom_pespp <- prune_taxa("OTU93", ma_otu_concom)
+
+ma_otu_concom_pespp %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_otu_concom_pespp <- prune_taxa("OTU93", be_otu_concom)
+
+be_otu_concom_pespp %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+  It's not really possible to compare the OTU93 abundance within the maize rhizosphere between mono and polyculture, because this OTU under polyculture condition was almost not present neither in the bulk soil neither within the maize rhizosphere compartment, hence the difference between mono and polyculture is more likely to be a "soil effect" rather than a "polyculture effect.
+
+```{r}
+ma_otu_concom_pedae1 <- prune_taxa("OTU826", ma_otu_concom)
+
+ma_otu_concom_pedae1 %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_otu_concom_pedae1 <- prune_taxa("OTU826", be_otu_concom)
+
+be_otu_concom_pedae1 %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+Moving on the OTU826 (*Pedobacter daejeonensis*), a new pattern can be observed. 
+	Indeed, its abundance seems to be higher within the monoculture maize rhizosphere that within the corresponding bulk soil. But it's the opposite under polyculture condition. 
+	When looking at what happened for beans, the OTU829 number of sequences is quite similar between the monoculture rhizosphere and the corresponding bulk soil. But under polyculture condition, bulk soil shows a clearly higher number of sequences that the bean rhizosphere compartment. 
+	Hence, the maize-bean association could somehow repress the maize ability to attract this OTU with the rhizosphere.
+
+```{r}
+ma_otu_concom_pedae2 <- prune_taxa("OTU2062", ma_otu_concom)
+
+ma_otu_concom_pedae2 %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_otu_concom_pedae2 <- prune_taxa("OTU2062", be_otu_concom)
+
+be_otu_concom_pedae2 %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+  For the OTU2062, belonging to the *Pedobacter daejeonensis* specie, a quite similar pattern that for the OTU826 (also a member of the *Pedobacter daejeonensis* specie) can be observed. Maybe because those strains are very phylogenetically close together they share a very similar ecological niche and respond the same way to those treatments.
+
+```{r}
+ma_otu_concom_sppa <- prune_taxa("OTU188", ma_otu_concom)
+
+ma_otu_concom_sppa %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_otu_concom_sppa <- prune_taxa("OTU188", be_otu_concom)
+
+be_otu_concom_sppa %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+Comparison between mono and polyculture is not easy for the OTU188, the number of sequences is very different between mono and polyculture for both maize and bean. The difference observed here between mono and polyculture maize rhizosphere-compartment OTU188 sequence-number could be more likely due to soil proprieties. 
+
+```{r}
+ma_otu_concom_flsp <- prune_taxa("OTU4769", ma_otu_concom)
+
+ma_otu_concom_flsp %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_otu_concom_flsp <- prune_taxa("OTU4769", be_otu_concom)
+
+be_otu_concom_flsp %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+For both mono and polyculture, also both maize and bean, the number of sequences from the OTU4769 (*Flavisolibacter spp.*) is higher within the bulk soil that within the corresponding rhizosphere compartment. So, here again, the differences observed is probably due to soil proprieties. 
+
+```{r}
+ma_otu_concom_pekr <- prune_taxa("OTU1734", ma_otu_concom)
+
+ma_otu_concom_pekr %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_otu_concom_pekr <- prune_taxa("OTU1734", be_otu_concom)
+
+be_otu_concom_pekr %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+	So here, the development of this OTU could be inhibited by bean rhizodeposits, even under polyculture condition. This could be possible if the development of this OTU is enhanced within maize rhizosphere by nutrient supplied by maize rhizodeposit but repressed by a bean rhizodeposit (or even by a negative interaction with a bean rhizo-microbiome member, competing for the same nutrients for instance).
+
+```{r}
+ma_otu_concom_acsp <- prune_taxa("OTU817", ma_otu_concom)
+
+ma_otu_concom_acsp %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_otu_concom_acsp <- prune_taxa("OTU817", be_otu_concom)
+
+be_otu_concom_acsp %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+  What happened for the OTU817 (*Actinospica sp*) is probably due to soil proprieties. Indeed, for both maize and bean, under monoculture condition, the number of sequences from the OTU817 is higher within the Rhizosphere than within the corresponding bulk soil. It's quite the same under polyculture condition but clearly of an order of magnitude lower. Hence, the development of this OTU within the rhizosphere seems to be more impacted by soil proprieties than culture conditions.
+
+```{r}
+ma_otu_concom_fesp <- prune_taxa("OTU12091", ma_otu_concom)
+
+ma_otu_concom_fesp %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+be_otu_concom_fesp <- prune_taxa("OTU12091", be_otu_concom)
+
+be_otu_concom_fesp %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+  For the OTU12091(*ferruginibacter sp.*), a pattern similar to what was observed for the OTU1734 (*Pedobacter kribbensis*). Suggesting that somehow, bean inhibit this OTU development within the rhizosphere over the maize ability to enhance it.
+
+#####High variance
+```{r}
+mamomaco_otus_highVar0.5 = 
+  filter_taxa(mamomaco, 
+              function(x) var(x) > 0.5, TRUE)
+
+maize_otus_highVar0.5 <- as.data.frame (mamomaco_otus_highVar0.5@otu_table)
+
+maize_otus_highVar0.5_sup15 <- maize_otus_highVar0.5[rowSums(maize_otus_highVar0.5) > 15,]
+
+maize_otus_highVar0.5_sup15_max6 <- maize_otus_highVar0.5_sup15[rowSums(maize_otus_highVar0.5_sup15 ==0) <= 6,]
+
+tax_maize_otus_highVar0.5_sup15_max6 <- subset(tax, rownames(tax) %in% rownames(maize_otus_highVar0.5_sup15_max6))
+
+mmvsmc_hv_otus_s15m6 <- DESeqDataSetFromMatrix(maize_otus_highVar0.5_sup15_max6,
+                                 meta_data_mamomaco,
+                                 design = ~ culture)
+mmvsmc_hv_otus_s15m6 <- DESeq(mmvsmc_hv_otus_s15m6)
+
+mmvsmc_hv_otus_s15m6_res <- results(mmvsmc_hv_otus_s15m6, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+otus_maize_hv_s15m6_sigtab = mmvsmc_hv_otus_s15m6_res[which(mmvsmc_hv_otus_s15m6_res$padj <= alpha), ]
+
+otus_maize_hv_s15m6_sigtab
+
+#UP
+otus_maize_hv_s15m6_sigtab_up <- otus_maize_hv_s15m6_sigtab[which(otus_maize_hv_s15m6_sigtab@listData$log2FoldChange > 0),]
+
+cbind(head(otus_maize_hv_s15m6_sigtab_up[order(otus_maize_hv_s15m6_sigtab_up$padj),]), tax[row.names(head(otus_maize_hv_s15m6_sigtab_up[order(otus_maize_hv_s15m6_sigtab_up$padj),])),2:7])
+plots.list <- lapply(row.names(head(otus_maize_hv_s15m6_sigtab_up[order(otus_maize_hv_s15m6_sigtab_up$padj),])),
+                     function(x) {
+                       d <- plotCounts(mmvsmc_hv_otus_s15m6, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Species"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+#DOwn
+otus_maize_hv_s15m6_sigtab_down <- otus_maize_hv_s15m6_sigtab[which(otus_maize_hv_s15m6_sigtab@listData$log2FoldChange < 0),]
+
+cbind(otus_maize_hv_s15m6_sigtab_down[order(otus_maize_hv_s15m6_sigtab_down$padj),], tax[row.names(otus_maize_hv_s15m6_sigtab_down[order(otus_maize_hv_s15m6_sigtab_down$padj),]),2:7])
+plots.list <- lapply(row.names(otus_maize_hv_s15m6_sigtab_down[order(otus_maize_hv_s15m6_sigtab_down$padj),]),
+                     function(x) {
+                       d <- plotCounts(mmvsmc_hv_otus_s15m6, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Species"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+	Same result that without variance filtering.
+
+##bean_bean-rhizo vs maize+bean_bean-rhizo
+```{r}
+bemobeco <- subset_samples(physeq, concom %in% c("bean _ bean-rhizo", "maize+bean _ bean-rhizo"))
+
+bemobeco <- subset_samples(bemobeco, farmer2 %in% c("Ro", "La", "Du", "So"))
+
+meta_data_bemobeco <- bemobeco@sam_data
+meta_data_bemobeco <- meta_data_bemobeco[,"condition"]
+colnames(meta_data_bemobeco) <- c("culture")
+meta_data_bemobeco <- as.data.frame(meta_data_bemobeco)
+
+tax_bemobeco <- as.data.frame(bemobeco@tax_table)
+```
+
+###Phylum level
+```{r}
+bemobeco_plm <- tax_glom(bemobeco, taxrank = "Phylum")
+
+bean_plm <- bemobeco_plm@otu_table
+
+bean_plm <- as.data.frame (bean_plm)
+
+bean_plm_sup12 <- bean_plm[rowSums(bean_plm) > 12,]
+
+bean_plm_sup12_max5 <- bean_plm_sup12[rowSums(bean_plm_sup12 ==0) <= 5,]
+
+bmvsbc_plm <- DESeqDataSetFromMatrix(bean_plm_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+bmvsbc_plm <- DESeq(bmvsbc_plm)
+
+bmvsbc_plm_res <- results(bmvsbc_plm, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+plm_bean_sigtab = bmvsbc_plm_res[which(bmvsbc_plm_res$padj <= alpha), ]
+
+plm_bean_sigtab
+
+#No adjusted p-value over 0.05 for positive LogFoldChange
+#Down
+```
+As expected, none of the calculated p-values (adjusted) is above the 5 percents threshold.
+
+#####High variance
+```{r}
+bemobeco_plm_highVar0.5 = 
+  filter_taxa(bemobeco_plm, 
+              function(x) var(x) > 0.5, TRUE)
+
+bean_plm_highVar0.5 <- as.data.frame (bemobeco_plm_highVar0.5@otu_table)
+
+bean_plm_highVar0.5_sup12 <- bean_plm_highVar0.5[rowSums(bean_plm_highVar0.5) > 12,]
+
+bean_plm_highVar0.5_sup12_max5 <- bean_plm_highVar0.5_sup12[rowSums(bean_plm_highVar0.5_sup12 ==0) <= 5,]
+
+tax_bean_plm_highVar0.5_sup12_max5 <- subset(tax, rownames(tax) %in% rownames(bean_plm_highVar0.5_sup12_max5))
+
+bmvsbc_hv_plm_s12m5 <- DESeqDataSetFromMatrix(bean_plm_highVar0.5_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+
+bmvsbc_hv_plm_s12m5 <- DESeq(bmvsbc_hv_plm_s12m5)
+
+bmvsbc_hv_plm_s12m5_res <- results(bmvsbc_hv_plm_s12m5, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+plm_bean_hv_s12m5_sigtab = bmvsbc_hv_plm_s12m5_res[which(bmvsbc_hv_plm_s12m5_res$padj <= alpha), ]
+
+plm_bean_hv_s12m5_sigtab
+
+```
+Same result that without filtering.
+
+###Class level
+```{r}
+bemobeco_cls <- tax_glom(bemobeco, taxrank = "Class")
+
+bean_cls <- bemobeco_cls@otu_table
+
+bean_cls <- as.data.frame (bean_cls)
+
+bean_cls_sup12 <- bean_cls[rowSums(bean_cls) > 12,]
+
+bean_cls_sup12_max5 <- bean_cls_sup12[rowSums(bean_cls_sup12 ==0) <= 5,]
+
+bmvsbc_cls <- DESeqDataSetFromMatrix(bean_cls_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+bmvsbc_cls <- DESeq(bmvsbc_cls)
+
+bmvsbc_cls_res <- results(bmvsbc_cls, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+cls_bean_sigtab = bmvsbc_cls_res[which(bmvsbc_cls_res$padj <= alpha), ]
+
+cls_bean_sigtab
+
+#No adjusted p-value over 0.05 for positive LogFoldChange
+#No down
+```
+Still none of the calculated p-values (adjusted) is above the 5 percents threshold.
+
+#####High variance
+```{r}
+bemobeco_cls_highVar0.5 = 
+  filter_taxa(bemobeco_cls, 
+              function(x) var(x) > 0.5, TRUE)
+
+bean_cls_highVar0.5 <- as.data.frame (bemobeco_cls_highVar0.5@otu_table)
+
+bean_cls_highVar0.5_sup12 <- bean_cls_highVar0.5[rowSums(bean_cls_highVar0.5) > 12,]
+
+bean_cls_highVar0.5_sup12_max5 <- bean_cls_highVar0.5_sup12[rowSums(bean_cls_highVar0.5_sup12 ==0) <= 5,]
+
+bmvsbc_hv_cls_s12m5 <- DESeqDataSetFromMatrix(bean_cls_highVar0.5_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+
+bmvsbc_hv_cls_s12m5 <- DESeq(bmvsbc_hv_cls_s12m5)
+
+bmvsbc_hv_cls_s12m5_res <- results(bmvsbc_hv_cls_s12m5, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+cls_bean_hv_s12m5_sigtab = bmvsbc_hv_cls_s12m5_res[which(bmvsbc_hv_cls_s12m5_res$padj <= alpha), ]
+
+cls_bean_hv_s12m5_sigtab
+
+```
+Same result that without filtering.
+
+###Order level
+```{r}
+bemobeco_odr <- tax_glom(bemobeco, taxrank = "Order")
+
+bean_odr <- bemobeco_odr@otu_table
+
+bean_odr <- as.data.frame (bean_odr)
+
+bean_odr_sup12 <- bean_odr[rowSums(bean_odr) > 12,]
+
+bean_odr_sup12_max5 <- bean_odr_sup12[rowSums(bean_odr_sup12 ==0) <= 5,]
+
+bmvsbc_odr <- DESeqDataSetFromMatrix(bean_odr_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+bmvsbc_odr <- DESeq(bmvsbc_odr)
+
+bmvsbc_odr_res <- results(bmvsbc_odr, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+odr_bean_sigtab = bmvsbc_odr_res[which(bmvsbc_odr_res$padj <= alpha), ]
+
+odr_bean_sigtab
+
+#No adjusted p-value over 0.05 for positive LogFoldChange
+#Down
+
+odr_bean_sigtab_down <- odr_bean_sigtab[which(odr_bean_sigtab@listData$log2FoldChange < 0),]
+
+cbind(head(odr_bean_sigtab_down[order(odr_bean_sigtab_down$padj),]), tax[row.names(head(odr_bean_sigtab_down[order(odr_bean_sigtab_down$padj),])),2:7])
+plots.list <- lapply(row.names(head(odr_bean_sigtab_down[order(odr_bean_sigtab_down$padj),])),
+                     function(x) {
+                       d <- plotCounts(bmvsbc_odr, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Order"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+
+```{r}
+be_or <- tax_glom(physeq, taxrank = "Order")
+be_or <- subset_samples(be_or, condition != "maize")
+be_or <- subset_samples(be_or, compartment != "maize-rhizo")
+be_or_concom <- merge_samples(be_or, "concom")
+be_or_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize+bean _ bean-rhizo", "maize+bean _ bulk")
+
+be_or_concom_vi <- subset_taxa(be_or_concom,Order =="vibrionales")
+
+be_or_concom_vi %>% 
+  plot_bar(fill = "Order", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+ma_or <- tax_glom(physeq, taxrank = "Order")
+ma_or <- subset_samples(ma_or, condition != "bean")
+ma_or <- subset_samples(ma_or, compartment != "bean-rhizo")
+ma_or_concom <- merge_samples(ma_or, "concom")
+ma_or_concom@sam_data$concom = c("maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+ma_or_concom_vi <- subset_taxa(ma_or_concom,Order =="vibrionales")
+
+ma_or_concom_vi %>% 
+  plot_bar(fill = "Order", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+  The *Vibrionales* order shows interesting features here. Within the monoculture bean rhizosphere and the corresponding bulk soil, its abundance is quite important. Under polyculture treatment, this abundance strongly decreases within the bean rhizosphere compartment but not within the bulk soil. Concurrently, this OTU abundance was quite low either within maize rhizosphere (monoculture and polyculture) and monoculture bulk soil. Hence, somehow, polyculture with maize could have a negative impact on this OTU abundance within the bean rhizosphere compartment.
+
+#####High variance
+```{r}
+bemobeco_odr_highVar0.5 = 
+  filter_taxa(bemobeco_odr, 
+              function(x) var(x) > 0.5, TRUE)
+
+bean_odr_highVar0.5 <- as.data.frame (bemobeco_odr_highVar0.5@otu_table)
+
+bean_odr_highVar0.5_sup12 <- bean_odr_highVar0.5[rowSums(bean_odr_highVar0.5) > 12,]
+
+bean_odr_highVar0.5_sup12_max5 <- bean_odr_highVar0.5_sup12[rowSums(bean_odr_highVar0.5_sup12 ==0) <= 5,]
+
+bmvsbc_hv_odr_s12m5 <- DESeqDataSetFromMatrix(bean_odr_highVar0.5_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+
+bmvsbc_hv_odr_s12m5 <- DESeq(bmvsbc_hv_odr_s12m5)
+
+bmvsbc_hv_odr_s12m5_res <- results(bmvsbc_hv_odr_s12m5, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+odr_bean_hv_s12m5_sigtab = bmvsbc_hv_odr_s12m5_res[which(bmvsbc_hv_odr_s12m5_res$padj <= alpha), ]
+
+odr_bean_hv_s12m5_sigtab
+
+odr_bean_hv_s12m5_sigtab_down <- odr_bean_hv_s12m5_sigtab[which(odr_bean_hv_s12m5_sigtab@listData$log2FoldChange < 0),]
+
+cbind(head(odr_bean_hv_s12m5_sigtab_down[order(odr_bean_hv_s12m5_sigtab_down$padj),]), tax[row.names(head(odr_bean_hv_s12m5_sigtab_down[order(odr_bean_hv_s12m5_sigtab_down$padj),])),2:7])
+plots.list <- lapply(row.names(head(odr_bean_hv_s12m5_sigtab_down[order(odr_bean_hv_s12m5_sigtab_down$padj),])),
+                     function(x) {
+                       d <- plotCounts(bmvsbc_hv_odr_s12m5, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Order"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+	Same result that without variance filtering.
+
+###Family level
+```{r}
+bemobeco_fmy <- tax_glom(bemobeco, taxrank = "Family")
+
+bean_fmy <- bemobeco_fmy@otu_table
+
+bean_fmy <- as.data.frame (bean_fmy)
+
+bean_fmy_sup12 <- bean_fmy[rowSums(bean_fmy) > 12,]
+
+bean_fmy_sup12_max5 <- bean_fmy_sup12[rowSums(bean_fmy_sup12 ==0) <= 5,]
+
+bmvsbc_fmy <- DESeqDataSetFromMatrix(bean_fmy_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+bmvsbc_fmy <- DESeq(bmvsbc_fmy)
+
+bmvsbc_fmy_res <- results(bmvsbc_fmy, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+fmy_bean_sigtab = bmvsbc_fmy_res[which(bmvsbc_fmy_res$padj <= alpha), ]
+
+fmy_bean_sigtab
+
+#No adjusted p-value over 0.05 for positive LogFoldChange
+#Down
+
+fmy_bean_sigtab_down <- fmy_bean_sigtab[which(fmy_bean_sigtab@listData$log2FoldChange < 0),]
+
+cbind(head(fmy_bean_sigtab_down[order(fmy_bean_sigtab_down$padj),]), tax[row.names(head(fmy_bean_sigtab_down[order(fmy_bean_sigtab_down$padj),])),2:7])
+plots.list <- lapply(row.names(head(fmy_bean_sigtab_down[order(fmy_bean_sigtab_down$padj),])),
+                     function(x) {
+                       d <- plotCounts(bmvsbc_fmy, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Family"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+
+
+```{r}
+be_fa <- tax_glom(physeq, taxrank = "Family")
+be_fa <- subset_samples(be_fa, condition != "maize")
+be_fa <- subset_samples(be_fa, compartment != "maize-rhizo")
+be_fa_concom <- merge_samples(be_fa, "concom")
+be_fa_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize+bean _ bean-rhizo", "maize+bean _ bulk")
+
+be_fa_concom_vi <- subset_taxa(be_fa_concom,Family =="vibrionaceae")
+
+be_fa_concom_vi %>% 
+  plot_bar(fill = "Family", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+ma_fa <- tax_glom(physeq, taxrank = "Family")
+ma_fa <- subset_samples(ma_fa, condition != "bean")
+ma_fa <- subset_samples(ma_fa, compartment != "bean-rhizo")
+ma_fa_concom <- merge_samples(ma_fa, "concom")
+ma_fa_concom@sam_data$concom = c("maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+ma_fa_concom_vi <- subset_taxa(ma_fa_concom,Family =="vibrionaceae")
+
+ma_fa_concom_vi %>% 
+  plot_bar(fill = "Family", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+	Same result that for the *Vibrionales* order.
+
+```{r}
+be_fa_concom_mi <- subset_taxa(be_fa_concom,Family =="moraxellaceae")
+
+be_fa_concom_mi %>% 
+  plot_bar(fill = "Family", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+ma_fa_concom_mi <- subset_taxa(ma_fa_concom,Family =="moraxellaceae")
+
+ma_fa_concom_mi %>% 
+  plot_bar(fill = "Family", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+This shows another possible example of maize-bean polyculture impact on the bean rhizo-microbiome. Under bean monoculture condition, the *Moraxellaceae* family abundance is of an order of magnitude higher within rhizosphere compartment than within bulk soil. Under polyculture condition, this family abundance within the bulk soil is quite similar to the monoculture bulk soil. But clearly lower within the bean rhizosphere than within monoculture bean rhizosphere. About maize rhizosphere, the abundance of this family is higher than within the bulk soil, either under mono and polyculture conditions, but the difference between maize rhizosphere and bulk soil is higher under polyculture condition than under monoculture condition. Hence, here maize-bean polyculture decreased the *Moraxellaceae* family abundance within bean rhizosphere, relatively to monoculture, but increased it within maize rhizosphere.
+
+#####High variance
+```{r}
+bemobeco_fmy_highVar0.5 = 
+  filter_taxa(bemobeco_fmy, 
+              function(x) var(x) > 0.5, TRUE)
+
+bean_fmy_highVar0.5 <- as.data.frame (bemobeco_fmy_highVar0.5@otu_table)
+
+bean_fmy_highVar0.5_sup12 <- bean_fmy_highVar0.5[rowSums(bean_fmy_highVar0.5) > 12,]
+
+bean_fmy_highVar0.5_sup12_max5 <- bean_fmy_highVar0.5_sup12[rowSums(bean_fmy_highVar0.5_sup12 ==0) <= 5,]
+
+bmvsbc_hv_fmy_s12m5 <- DESeqDataSetFromMatrix(bean_fmy_highVar0.5_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+
+bmvsbc_hv_fmy_s12m5 <- DESeq(bmvsbc_hv_fmy_s12m5)
+
+bmvsbc_hv_fmy_s12m5_res <- results(bmvsbc_hv_fmy_s12m5, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+fmy_bean_hv_s12m5_sigtab = bmvsbc_hv_fmy_s12m5_res[which(bmvsbc_hv_fmy_s12m5_res$padj <= alpha), ]
+
+fmy_bean_hv_s12m5_sigtab
+
+fmy_bean_hv_s12m5_sigtab_down <- fmy_bean_hv_s12m5_sigtab[which(fmy_bean_hv_s12m5_sigtab@listData$log2FoldChange < 0),]
+
+cbind(head(fmy_bean_hv_s12m5_sigtab_down[order(fmy_bean_hv_s12m5_sigtab_down$padj),]), tax[row.names(head(fmy_bean_hv_s12m5_sigtab_down[order(fmy_bean_hv_s12m5_sigtab_down$padj),])),2:7])
+plots.list <- lapply(row.names(head(fmy_bean_hv_s12m5_sigtab_down[order(fmy_bean_hv_s12m5_sigtab_down$padj),])),
+                     function(x) {
+                       d <- plotCounts(bmvsbc_hv_fmy_s12m5, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Family"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+	Same result that without variance filtering.
+
+###Genus level
+```{r}
+bemobeco_gns <- tax_glom(bemobeco, taxrank = "Genus")
+
+bean_gns <- bemobeco_gns@otu_table
+
+bean_gns <- as.data.frame (bean_gns)
+
+bean_gns_sup12 <- bean_gns[rowSums(bean_gns) > 100,]
+
+bean_gns_sup12_max5 <- bean_gns_sup12[rowSums(bean_gns_sup12 ==0) == 0,]
+
+bmvsbc_gns <- DESeqDataSetFromMatrix(bean_gns_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+bmvsbc_gns <- DESeq(bmvsbc_gns)
+
+bmvsbc_gns_res <- results(bmvsbc_gns, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+gns_bean_sigtab = bmvsbc_gns_res[which(bmvsbc_gns_res$padj <= alpha), ]
+
+gns_bean_sigtab
+
+#No adjusted p-value over 0.05 for positive LogFoldChange
+#Down
+
+gns_bean_sigtab_down <- gns_bean_sigtab[which(gns_bean_sigtab@listData$log2FoldChange < 0),]
+
+cbind(head(gns_bean_sigtab_down[order(gns_bean_sigtab_down$padj),]), tax[row.names(head(gns_bean_sigtab_down[order(gns_bean_sigtab_down$padj),])),2:7])
+plots.list <- lapply(row.names(head(gns_bean_sigtab_down[order(gns_bean_sigtab_down$padj),])),
+                     function(x) {
+                       d <- plotCounts(bmvsbc_gns, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Genus"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+```
+
+```{r}
+be_ge <- tax_glom(physeq, taxrank = "Genus")
+be_ge <- subset_samples(be_ge, condition != "maize")
+be_ge <- subset_samples(be_ge, compartment != "maize-rhizo")
+be_ge_concom <- merge_samples(be_ge, "concom")
+be_ge_concom@sam_data$concom = c("bean _ bean-rhizo", "bean _ bulk", "maize+bean _ bean-rhizo", "maize+bean _ bulk")
+
+be_ge_concom_vi <- subset_taxa(be_ge_concom,Genus =="vibrio")
+
+be_ge_concom_vi %>% 
+  plot_bar(fill = "Genus", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+ma_ge <- tax_glom(physeq, taxrank = "Genus")
+ma_ge <- subset_samples(ma_ge, condition != "bean")
+ma_ge <- subset_samples(ma_ge, compartment != "bean-rhizo")
+ma_ge_concom <- merge_samples(ma_ge, "concom")
+ma_ge_concom@sam_data$concom = c("maize _ bulk", "maize _ maize-rhizo", "maize+bean _ bulk", "maize+bean _ maize-rhizo")
+
+ma_ge_concom_vi <- subset_taxa(ma_ge_concom,Genus =="vibrio")
+
+ma_ge_concom_vi %>% 
+  plot_bar(fill = "Genus", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+	Same result that for the *Vibrionales* order.
+
+```{r}
+be_ge_concom_mi <- subset_taxa(be_ge_concom,Genus =="acinetobacter")
+
+be_ge_concom_mi %>% 
+  plot_bar(fill = "Genus", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+ma_ge_concom_mi <- subset_taxa(ma_ge_concom,Genus =="acinetobacter")
+
+ma_ge_concom_mi %>% 
+  plot_bar(fill = "Genus", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+Same result that for the *Moraxellaceae* family.
+
+#####High variance
+```{r}
+bemobeco_gns_highVar0.5 = 
+  filter_taxa(bemobeco_gns, 
+              function(x) var(x) > 0.5, TRUE)
+
+bean_gns_highVar0.5 <- as.data.frame (bemobeco_gns_highVar0.5@otu_table)
+
+bean_gns_highVar0.5_sup12 <- bean_gns_highVar0.5[rowSums(bean_gns_highVar0.5) > 12,]
+
+bean_gns_highVar0.5_sup12_max5 <- bean_gns_highVar0.5_sup12[rowSums(bean_gns_highVar0.5_sup12 ==0) <= 5,]
+
+bmvsbc_hv_gns_s12m5 <- DESeqDataSetFromMatrix(bean_gns_highVar0.5_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+
+bmvsbc_hv_gns_s12m5 <- DESeq(bmvsbc_hv_gns_s12m5)
+
+bmvsbc_hv_gns_s12m5_res <- results(bmvsbc_hv_gns_s12m5, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+gns_bean_hv_s12m5_sigtab = bmvsbc_hv_gns_s12m5_res[which(bmvsbc_hv_gns_s12m5_res$padj <= alpha), ]
+
+gns_bean_hv_s12m5_sigtab
+
+gns_bean_hv_s12m5_sigtab_down <- gns_bean_hv_s12m5_sigtab[which(gns_bean_hv_s12m5_sigtab@listData$log2FoldChange < 0),]
+
+cbind(head(gns_bean_hv_s12m5_sigtab_down[order(gns_bean_hv_s12m5_sigtab_down$padj),]), tax[row.names(head(gns_bean_hv_s12m5_sigtab_down[order(gns_bean_hv_s12m5_sigtab_down$padj),])),2:7])
+plots.list <- lapply(row.names(head(gns_bean_hv_s12m5_sigtab_down[order(gns_bean_hv_s12m5_sigtab_down$padj),])),
+                     function(x) {
+                       d <- plotCounts(bmvsbc_hv_gns_s12m5, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Genus"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+Here, the *Acinetobacter* genus was filtered because of its too low variance, but it didn't allow more adjusted p-values to get above the 5 percent threshold. Besides this, the result is the same that without filtering.
+
+###Species level
+```{r}
+bemobeco_sps <- tax_glom(bemobeco, taxrank = "Species")
+
+bean_sps <- bemobeco_sps@otu_table
+
+bean_sps <- as.data.frame (bean_sps)
+
+bean_sps_sup12 <- bean_sps[rowSums(bean_sps) > 12,]
+
+bean_sps_sup12_max5 <- bean_sps_sup12[rowSums(bean_sps_sup12 ==0) <= 5,]
+
+bmvsbc_sps <- DESeqDataSetFromMatrix(bean_sps_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+bmvsbc_sps <- DESeq(bmvsbc_sps)
+
+bmvsbc_sps_res <- results(bmvsbc_sps, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+sps_bean_sigtab = bmvsbc_sps_res[which(bmvsbc_sps_res$padj <= alpha), ]
+
+sps_bean_sigtab
+
+#Still no up
+
+#Down
+
+sps_bean_sigtab_down <- sps_bean_sigtab[which(sps_bean_sigtab@listData$log2FoldChange < 0),]
+
+cbind(head(sps_bean_sigtab_down[order(sps_bean_sigtab_down$padj),]), tax[row.names(head(sps_bean_sigtab_down[order(sps_bean_sigtab_down$padj),])),2:7])
+plots.list <- lapply(row.names(head(sps_bean_sigtab_down[order(sps_bean_sigtab_down$padj),])),
+                     function(x) {
+                       d <- plotCounts(bmvsbc_sps, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Species"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+```
+	So here the Species from the Acinetobacter genus didn't display adjusted p-values above the 5 percent threshold. Maybe the difference between those specie abundances is not big enough to be detected when taken separately, or not big enough to be detected because of a more stringent p-value correction due to a higher number of species than genus.
+	Besides that, the result for *Vibrio sp.* is the same than for *Vibrio* genus.
+
+#####High variance
+```{r}
+bemobeco_sps_highVar0.5 = 
+  filter_taxa(bemobeco_sps, 
+              function(x) var(x) > 0.5, TRUE)
+
+bean_sps_highVar0.5 <- as.data.frame (bemobeco_sps_highVar0.5@otu_table)
+
+bean_sps_highVar0.5_sup12 <- bean_sps_highVar0.5[rowSums(bean_sps_highVar0.5) > 12,]
+
+bean_sps_highVar0.5_sup12_max5 <- bean_sps_highVar0.5_sup12[rowSums(bean_sps_highVar0.5_sup12 ==0) <= 5,]
+
+bmvsbc_hv_sps_s12m5 <- DESeqDataSetFromMatrix(bean_sps_highVar0.5_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+
+bmvsbc_hv_sps_s12m5 <- DESeq(bmvsbc_hv_sps_s12m5)
+
+bmvsbc_hv_sps_s12m5_res <- results(bmvsbc_hv_sps_s12m5, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+sps_bean_hv_s12m5_sigtab = bmvsbc_hv_sps_s12m5_res[which(bmvsbc_hv_sps_s12m5_res$padj <= alpha), ]
+
+sps_bean_hv_s12m5_sigtab
+
+sps_bean_hv_s12m5_sigtab_down <- sps_bean_hv_s12m5_sigtab[which(sps_bean_hv_s12m5_sigtab@listData$log2FoldChange < 0),]
+
+cbind(head(sps_bean_hv_s12m5_sigtab_down[order(sps_bean_hv_s12m5_sigtab_down$padj),]), tax[row.names(head(sps_bean_hv_s12m5_sigtab_down[order(sps_bean_hv_s12m5_sigtab_down$padj),])),2:7])
+plots.list <- lapply(row.names(head(sps_bean_hv_s12m5_sigtab_down[order(sps_bean_hv_s12m5_sigtab_down$padj),])),
+                     function(x) {
+                       d <- plotCounts(bmvsbc_hv_sps_s12m5, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Species"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+
+```
+	Same result that without variance filtering.
+
+###OTUs level
+```{r}
+bean_otus <- bemobeco@otu_table
+
+bean_otus <- as.data.frame (bean_otus)
+
+bean_otus_sup12 <- bean_otus[rowSums(bean_otus) > 12,]
+
+bean_otus_sup12_max5 <- bean_otus_sup12[rowSums(bean_otus_sup12 ==0) <= 5,]
+
+bmvsbc <- DESeqDataSetFromMatrix(bean_otus_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+bmvsbc <- DESeq(bmvsbc)
+
+bmvsbc_res <- results(bmvsbc, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+otus_bean_sigtab = bmvsbc_res[which(bmvsbc_res$padj <= alpha), ]
+
+otus_bean_sigtab
+
+#No up
+
+#No down
+```
+	Nothing came out from the OTU level. Probably because there are too many OTU to test so the p-value correction is very stringent.
+
+```{r}
+
+bean_otus_sup100 <- bean_otus[rowSums(bean_otus) > 100,]
+
+bean_otus_sup100_max0 <- bean_otus_sup100[rowSums(bean_otus_sup100 ==0) == 0,]
+
+bmvsbc <- DESeqDataSetFromMatrix(bean_otus_sup100_max0,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+bmvsbc <- DESeq(bmvsbc)
+
+bmvsbc_res <- results(bmvsbc, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+otus_bean_sigtab = bmvsbc_res[which(bmvsbc_res$padj <= alpha), ]
+
+otus_bean_sigtab
+
+#No up
+
+#Down
+otus_bean_sigtab_down <- otus_bean_sigtab[which(otus_bean_sigtab@listData$log2FoldChange < 0),]
+
+cbind(head(otus_bean_sigtab_down[order(otus_bean_sigtab_down$pvalue),]), tax[row.names(head(otus_bean_sigtab_down[order(otus_bean_sigtab_down$pvalue),])),2:7])
+plots.list <- lapply(row.names(head(otus_bean_sigtab_down[order(otus_bean_sigtab_down$pvalue),])),
+                     function(x) {
+                       d <- plotCounts(bmvsbc, x, intgroup=c("culture"), returnData=TRUE)
+                       ggplot(d, aes(x=culture, y=count, group=1)) +
+                         geom_point() + stat_smooth(se=FALSE,method="loess") + scale_y_log10() +
+                         ggtitle(tax[x,"Species"]) +
+                         theme(axis.title.x = element_blank(), legend.title=element_blank(), legend.position="top", legend.box="horizontal", legend.key.height = unit(.5, "cm"),legend.text=element_text(size=6))
+                     }
+)
+do.call(grid.arrange,plots.list)
+```
+	If we raise up the OTU selection criterion (number of OTU sequences superior to 100 per sample and at least 1 sequence in every sample), we can find back the member of the *Vibrio sp.* specie. Two members of the *Paenibacillus* genus (*Paenibacillus spp.* and *Paenibacillus sp.*) were also found to be significantly (at a 5 percent threshold) less abundant under polyculture condition than under monoculture condition.
+
+```{r}
+be_otu_concom_vi <- prune_taxa("OTU33", be_otu_concom)
+
+be_otu_concom_vi %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+ma_otu_concom_vi <- prune_taxa("OTU33", ma_otu_concom)
+
+ma_otu_concom_vi %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+So here we can see that results observed from the *Vibrionales* order to the *Vibrio sp.* specie are due to the OTU33.
+
+```{r}
+be_otu_concom_pa1 <- prune_taxa("OTU531", be_otu_concom)
+
+be_otu_concom_pa1 %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+ma_otu_concom_pa1 <- prune_taxa("OTU531", ma_otu_concom)
+
+ma_otu_concom_pa1 %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+	The comparison between the OTU531 abundance within the mono and polyculture bean rhizosphere compartment is not facilitated by this abundance difference observed between mono and polyculture bulk soil. Indeed, there were very few sequences of this OTU within the monoculture bulk soil but there was a lot within the polyculture one. 
+	But interestingly, for both bean and maize monoculture, the rhizosphere compartment contained more sequences of this OTU than the bulk soil did, and under polyculture condition, the opposite is observed. Meaning that this OTU abundance is higher within the bulk soil than within the rhizosphere compartments.
+
+```{r}
+be_otu_concom_pa2 <- prune_taxa("OTU147", be_otu_concom)
+
+be_otu_concom_pa2 %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+
+```{r}
+ma_otu_concom_pa2 <- prune_taxa("OTU147", ma_otu_concom)
+
+ma_otu_concom_pa2 %>% 
+  plot_bar(fill = "Species", 
+         x = "concom")+
+  theme(axis.text.x = element_text(angle = 330, size = 12, face = "bold"),
+        axis.title.x = element_blank())+
+  ylab(label = " Sequence counts")
+```
+	For the bean, kind of the same pattern is observed for the OTU147 (a member of the *Paenibacillus sp.* specie) than for the OTU531. But for the maize, either under mono and polyculture condition, the bulk soil always contained more sequences from the OTU147 than the rhizosphere compartment did.
+
+#####High variance
+```{r}
+bean_otus_highVar0.5 = 
+  filter_taxa(bemobeco, 
+              function(x) var(x) > 0.5, TRUE)
+
+bean_otus_highVar0.5 <- as.data.frame (bean_otus_highVar0.5@otu_table)
+
+bean_otus_highVar0.5_sup12 <- bean_otus_highVar0.5[rowSums(bean_otus_highVar0.5) > 100,]
+
+bean_otus_highVar0.5_sup12_max5 <- bean_otus_highVar0.5_sup12[rowSums(bean_otus_highVar0.5_sup12 ==0) ==0,]
+
+bmvsbc_hv_otus_s12m5 <- DESeqDataSetFromMatrix(bean_otus_highVar0.5_sup12_max5,
+                                 meta_data_bemobeco,
+                                 design = ~ culture)
+
+bmvsbc_hv_otus_s12m5 <- DESeq(bmvsbc_hv_otus_s12m5)
+
+bmvsbc_hv_otus_s12m5_res <- results(bmvsbc_hv_otus_s12m5, cooksCutoff = FALSE)
+
+alpha = 0.05
+
+otus_bean_hv_s12m5_sigtab = bmvsbc_hv_otus_s12m5_res[which(bmvsbc_hv_otus_s12m5_res$padj <= alpha), ]
+
+otus_bean_hv_s12m5_sigtab
+```
+	Same result that without variance filtering.
+
+
+##Permanova
+###OTU level
+```{r}
+physeq.bray <- phyloseq::distance(physeq, "bray")
+md <- as.data.frame(cbind(physeq@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeq.bray ~ condition, data = md)
+adonis2(physeq.bray ~ compartment, data = md)
+adonis2(physeq.bray ~ concom, data = md)
+adonis2(physeq.bray ~ farmer2, data = md)
+```
+
+```{r}
+physeqwb <- subset_samples(physeq, compartment != "bulk")
+physeqwb.bray <- phyloseq::distance(physeqwb, "bray")
+mdwb <- as.data.frame(cbind(physeqwb@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeqwb.bray ~ condition, data = mdwb)
+adonis2(physeqwb.bray ~ compartment, data = mdwb)
+adonis2(physeqwb.bray ~ concom, data = mdwb)
+adonis2(physeqwb.bray ~ farmer2, data = mdwb)
+```
+
+####bean mono vs bean co
+```{r}
+bemobeco.bray <- phyloseq::distance(bemobeco, "bray")
+bean_otus_md <- as.data.frame(cbind(bemobeco@sam_data[,c("condition", "farmer2")]))
+bean_otus_md$condition <- as.factor(bean_otus_md$condition)
+adonis2(bemobeco.bray ~ condition, data = bean_otus_md)
+adonis2(bemobeco.bray ~ farmer2, data = bean_otus_md) 
+```
+
+####maize mono vs maize co
+```{r}
+mamomaco.bray <- phyloseq::distance(mamomaco, "bray")
+maize_otus_md <- as.data.frame(cbind(mamomaco@sam_data[,c("condition","farmer2")]))
+maize_otus_md$condition <- as.factor(maize_otus_md$condition)
+adonis2(mamomaco.bray ~ condition, data = maize_otus_md) 
+adonis2(mamomaco.bray ~ farmer2, data = maize_otus_md) 
+```
+
+###Specie level
+```{r}
+physeq_sps.bray <- phyloseq::distance(physeq_sps, "bray")
+md_sps <- as.data.frame(cbind(physeq_sps@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeq_sps.bray ~ condition, data = md_sps)
+adonis2(physeq_sps.bray ~ compartment, data = md_sps)
+adonis2(physeq_sps.bray ~ concom, data = md_sps)
+adonis2(physeq_sps.bray ~ farmer2, data = md_sps)
+```
+
+```{r}
+physeqwb_sps <- subset_samples(physeq_sps, compartment != "bulk")
+physeqwb_sps.bray <- phyloseq::distance(physeqwb_sps, "bray")
+mdwb_sps <- as.data.frame(cbind(physeqwb_sps@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeqwb_sps.bray ~ condition, data = mdwb_sps)
+adonis2(physeqwb_sps.bray ~ compartment, data = mdwb_sps)
+adonis2(physeqwb_sps.bray ~ concom, data = mdwb_sps)
+adonis2(physeqwb_sps.bray ~ farmer2, data = mdwb_sps)
+```
+
+####bean mono vs bean co
+```{r}
+bemobeco_sps.bray <- phyloseq::distance(bemobeco_sps, "bray")
+bean_sps_md <- as.data.frame(cbind(bemobeco_sps@sam_data[,c("condition", "farmer2")]))
+bean_sps_md$condition <- as.factor(bean_sps_md$condition)
+adonis2(bemobeco_sps.bray ~ condition, data = bean_sps_md)
+adonis2(bemobeco_sps.bray ~ farmer2, data = bean_sps_md) 
+```
+
+####maize mono vs maize co
+```{r}
+mamomaco_sps.bray <- phyloseq::distance(mamomaco_sps, "bray")
+maize_sps_md <- as.data.frame(cbind(mamomaco_sps@sam_data[,c("condition","farmer2")]))
+adonis2(mamomaco_sps.bray ~ condition, data = maize_sps_md) 
+adonis2(mamomaco_sps.bray ~ farmer2, data = maize_sps_md) 
+```
+
+###Genus level
+```{r}
+physeq_gns.bray <- phyloseq::distance(physeq_gns, "bray")
+md_gns <- as.data.frame(cbind(physeq_gns@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeq_gns.bray ~ condition, data = md_gns)
+adonis2(physeq_gns.bray ~ compartment, data = md_gns)
+adonis2(physeq_gns.bray ~ concom, data = md_gns)
+adonis2(physeq_gns.bray ~ farmer2, data = md_gns)
+```
+
+```{r}
+physeqwb_gns <- subset_samples(physeq_gns, compartment != "bulk")
+physeqwb_gns.bray <- phyloseq::distance(physeqwb_gns, "bray")
+mdwb_gns <- as.data.frame(cbind(physeqwb_gns@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeqwb_gns.bray ~ condition, data = mdwb_gns)
+adonis2(physeqwb_gns.bray ~ compartment, data = mdwb_gns)
+adonis2(physeqwb_gns.bray ~ concom, data = mdwb_gns)
+adonis2(physeqwb_gns.bray ~ farmer2, data = mdwb_gns)
+```
+
+####bean mono vs bean co
+```{r}
+bemobeco_gns.bray <- phyloseq::distance(bemobeco_gns, "bray")
+bean_gns_md <- as.data.frame(cbind(bemobeco_gns@sam_data[,c("condition", "farmer2")]))
+bean_gns_md$condition <- as.factor(bean_gns_md$condition)
+adonis2(bemobeco_gns.bray ~ condition, data = bean_gns_md)
+adonis2(bemobeco_gns.bray ~ farmer2, data = bean_gns_md) 
+```
+
+####maize mono vs maize co
+```{r}
+mamomaco_gns.bray <- phyloseq::distance(mamomaco_gns, "bray")
+maize_gns_md <- as.data.frame(cbind(mamomaco_gns@sam_data[,c("condition","farmer2")]))
+adonis2(mamomaco_gns.bray ~ condition, data = maize_gns_md) 
+adonis2(mamomaco_gns.bray ~ farmer2, data = maize_gns_md) 
+```
+
+###family level
+```{r}
+physeq_fmy.bray <- phyloseq::distance(physeq_fmy, "bray")
+md_fmy <- as.data.frame(cbind(physeq_fmy@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeq_fmy.bray ~ condition, data = md_fmy)
+adonis2(physeq_fmy.bray ~ compartment, data = md_fmy)
+adonis2(physeq_fmy.bray ~ concom, data = md_fmy)
+adonis2(physeq_fmy.bray ~ farmer2, data = md_fmy)
+```
+
+```{r}
+physeqwb_fmy <- subset_samples(physeq_fmy, compartment != "bulk")
+physeqwb_fmy.bray <- phyloseq::distance(physeqwb_fmy, "bray")
+mdwb_fmy <- as.data.frame(cbind(physeqwb_fmy@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeqwb_fmy.bray ~ condition, data = mdwb_fmy)
+adonis2(physeqwb_fmy.bray ~ compartment, data = mdwb_fmy)
+adonis2(physeqwb_fmy.bray ~ concom, data = mdwb_fmy)
+adonis2(physeqwb_fmy.bray ~ farmer2, data = mdwb_fmy)
+```
+
+####bean mono vs bean co
+```{r}
+bemobeco_fmy.bray <- phyloseq::distance(bemobeco_fmy, "bray")
+bean_fmy_md <- as.data.frame(cbind(bemobeco_fmy@sam_data[,c("condition", "farmer2")]))
+bean_fmy_md$condition <- as.factor(bean_fmy_md$condition)
+adonis2(bemobeco_fmy.bray ~ condition, data = bean_fmy_md)
+adonis2(bemobeco_fmy.bray ~ farmer2, data = bean_fmy_md) 
+```
+
+####maize mono vs maize co
+```{r}
+mamomaco_fmy.bray <- phyloseq::distance(mamomaco_fmy, "bray")
+maize_fmy_md <- as.data.frame(cbind(mamomaco_fmy@sam_data[,c("condition","farmer2")]))
+adonis2(mamomaco_fmy.bray ~ condition, data = maize_fmy_md) 
+adonis2(mamomaco_fmy.bray ~ farmer2, data = maize_fmy_md) 
+```
+
+###Order level
+```{r}
+physeq_odr.bray <- phyloseq::distance(physeq_odr, "bray")
+md_odr <- as.data.frame(cbind(physeq_odr@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeq_odr.bray ~ condition, data = md_odr)
+adonis2(physeq_odr.bray ~ compartment, data = md_odr)
+adonis2(physeq_odr.bray ~ concom, data = md_odr)
+adonis2(physeq_odr.bray ~ farmer2, data = md_odr)
+```
+
+```{r}
+physeqwb_odr <- subset_samples(physeq_odr, compartment != "bulk")
+physeqwb_odr.bray <- phyloseq::distance(physeqwb_odr, "bray")
+mdwb_odr <- as.data.frame(cbind(physeqwb_odr@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeqwb_odr.bray ~ condition, data = mdwb_odr)
+adonis2(physeqwb_odr.bray ~ compartment, data = mdwb_odr)
+adonis2(physeqwb_odr.bray ~ concom, data = mdwb_odr)
+adonis2(physeqwb_odr.bray ~ farmer2, data = mdwb_odr)
+```
+
+####bean mono vs bean co
+```{r}
+bemobeco_fmy.bray <- phyloseq::distance(bemobeco_fmy, "bray")
+bean_fmy_md <- as.data.frame(cbind(bemobeco_fmy@sam_data[,c("condition", "farmer2")]))
+bean_fmy_md$condition <- as.factor(bean_fmy_md$condition)
+adonis2(bemobeco_fmy.bray ~ condition, data = bean_fmy_md)
+adonis2(bemobeco_fmy.bray ~ farmer2, data = bean_fmy_md) 
+```
+
+####maize mono vs maize co
+```{r}
+mamomaco_fmy.bray <- phyloseq::distance(mamomaco_fmy, "bray")
+maize_fmy_md <- as.data.frame(cbind(mamomaco_fmy@sam_data[,c("condition","farmer2")]))
+adonis2(mamomaco_fmy.bray ~ condition, data = maize_fmy_md) 
+adonis2(mamomaco_fmy.bray ~ farmer2, data = maize_fmy_md) 
+```
+
+###Class level
+```{r}
+physeq_cls.bray <- phyloseq::distance(physeq_cls, "bray")
+md_cls <- as.data.frame(cbind(physeq_cls@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeq_cls.bray ~ condition, data = md_cls)
+adonis2(physeq_cls.bray ~ compartment, data = md_cls)
+adonis2(physeq_cls.bray ~ concom, data = md_cls)
+adonis2(physeq_cls.bray ~ farmer2, data = md_cls)
+```
+
+```{r}
+physeqwb_cls <- subset_samples(physeq_cls, compartment != "bulk")
+physeqwb_cls.bray <- phyloseq::distance(physeqwb_cls, "bray")
+mdwb_cls <- as.data.frame(cbind(physeqwb_cls@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeqwb_cls.bray ~ condition, data = mdwb_cls)
+adonis2(physeqwb_cls.bray ~ compartment, data = mdwb_cls)
+adonis2(physeqwb_cls.bray ~ concom, data = mdwb_cls)
+adonis2(physeqwb_cls.bray ~ farmer2, data = mdwb_cls)
+```
+
+####bean mono vs bean co
+```{r}
+bemobeco_cls.bray <- phyloseq::distance(bemobeco_cls, "bray")
+bean_cls_md <- as.data.frame(cbind(bemobeco_cls@sam_data[,c("condition", "farmer2")]))
+bean_cls_md$condition <- as.factor(bean_cls_md$condition)
+adonis2(bemobeco_cls.bray ~ condition, data = bean_cls_md)
+adonis2(bemobeco_cls.bray ~ farmer2, data = bean_cls_md) 
+```
+
+####maize mono vs maize co
+```{r}
+mamomaco_cls.bray <- phyloseq::distance(mamomaco_cls, "bray")
+maize_cls_md <- as.data.frame(cbind(mamomaco_cls@sam_data[,c("condition","farmer2")]))
+adonis2(mamomaco_cls.bray ~ condition, data = maize_cls_md) 
+adonis2(mamomaco_cls.bray ~ farmer2, data = maize_cls_md) 
+```
+
+###Phylum level
+```{r}
+physeq_plm.bray <- phyloseq::distance(physeq_plm, "bray")
+md_plm <- as.data.frame(cbind(physeq_plm@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeq_plm.bray ~ condition, data = md_plm)
+adonis2(physeq_plm.bray ~ compartment, data = md_plm)
+adonis2(physeq_plm.bray ~ concom, data = md_plm)
+adonis2(physeq_plm.bray ~ farmer2, data = md_plm)
+```
+
+```{r}
+physeqwb_plm <- subset_samples(physeq_plm, compartment != "bulk")
+physeqwb_plm.bray <- phyloseq::distance(physeqwb_plm, "bray")
+mdwb_plm <- as.data.frame(cbind(physeqwb_plm@sam_data[,c("condition", "compartment", "concom", "farmer2")]))
+adonis2(physeqwb_plm.bray ~ condition, data = mdwb_plm)
+adonis2(physeqwb_plm.bray ~ compartment, data = mdwb_plm)
+adonis2(physeqwb_plm.bray ~ concom, data = mdwb_plm)
+adonis2(physeqwb_plm.bray ~ farmer2, data = mdwb_plm)
+```
+
+####bean mono vs bean co
+```{r}
+bemobeco_plm.bray <- phyloseq::distance(bemobeco_plm, "bray")
+bean_plm_md <- as.data.frame(cbind(bemobeco_plm@sam_data[,c("condition", "farmer2")]))
+bean_plm_md$condition <- as.factor(bean_plm_md$condition)
+adonis2(bemobeco_plm.bray ~ condition, data = bean_plm_md)
+adonis2(bemobeco_plm.bray ~ farmer2, data = bean_plm_md) 
+```
+
+####maize mono vs maize co
+```{r}
+mamomaco_plm.bray <- phyloseq::distance(mamomaco_plm, "bray")
+maize_plm_md <- as.data.frame(cbind(mamomaco_plm@sam_data[,c("condition","farmer2")]))
+adonis2(mamomaco_plm.bray ~ condition, data = maize_plm_md) 
+adonis2(mamomaco_plm.bray ~ farmer2, data = maize_plm_md) 
+```
+
+###Table with pvalues
+```{r}
+permanova_pvalues <- read.csv(file = "permanova_pvalues.csv")
+permanova_pvalues
+```
+
+##Conclusion
+
+In the Overall, those results suggest that soil physicochemical proprieties have a greater impact on the rhizo-microbiome than culture types (mono or polyculture).
+	At the OTU and Species level, a significative difference (at a 1 percent threshold) was detected between different compartments (bulk soil, bean and maize rhizosphere) which was not the case between only bean and maize rhizosphere compartments. This suggests that rhizo-microbiome, even when coming from two different plant Classes (*Liliopsida* and *Magnoliophyta* respectively for maize and bean) are closer together than they are from the soil microbiome (a core rhizo-microbiome and a different core soil microbiome could be found ?).
+	Significative differences (at a 5 percent threshold) within rhizosphere compartments were detected between mono and polyculture conditions. Highlighting the fact that either positive and negative interactions, in term of bacteria recruitment/stimulation abilities between maize and bean could occur. Also, as reported in the literature, interactions between plant and it's rhizo-microbiome seems to be mostly observed at the variety-strain taxonomic level. But it is important to acknowledge that those differences do not demonstrate any causality effect, so soil proprieties could also be responsible for those differences. Correlations made here opened the track for more precise or bigger scale (or even both) experiments.
+
